@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AetherShare",
+  "version": "0.1.0",
+  "identifier": "org.aethershare.desktop",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm --prefix ../ui run dev",
+    "beforeBuildCommand": "npm --prefix ../ui run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "AetherShare",
+        "width": 1120,
+        "height": 740,
+        "minWidth": 820,
+        "minHeight": 580,
+        "center": true,
+        "resizable": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["rpm", "deb", "appimage"],
+    "icon": ["icons/icon.png"],
+    "category": "Network",
+    "shortDescription": "Open-Source Quick Share & AirDrop for Linux (Material 3 Expressive)",
+    "linux": {
+      "deb": {
+        "depends": ["bluez", "network-manager"]
+      },
+      "rpm": {
+        "depends": ["bluez", "NetworkManager"]
+      }
+    }
+  }
+}

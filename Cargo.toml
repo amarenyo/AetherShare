@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aethershare-proto",
+    "crates/aethershare-core",
+    "crates/aethershare-airdrop",
+    "crates/aethershare-cli",
+]
+exclude = ["app/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/amarenyo/AetherShare"
+
+[profile.release]
+lto = true
+opt-level = 3
+codegen-units = 1

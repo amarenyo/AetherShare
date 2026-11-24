@@ -1,0 +1,26 @@
+[package]
+name = "aethershare-airdrop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aethershare-core = { path = "../aethershare-core" }
+anyhow = "1.0"
+base64 = "0.23"
+bytes = "1.10"
+flate2 = "1.1"
+hex = "0.4"
+log = "0.4"
+mdns-sd = { git = "https://github.com/Martichou/mdns-sd", branch = "unsolicited" }
+mime_guess = "2.0"
+plist = "1.7"
+rand = "0.10"
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.11"
+tokio = { version = "1.43", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-util = { version = "0.7", features = ["rt"] }

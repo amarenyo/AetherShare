@@ -1,0 +1,28 @@
+[package]
+name = "aethershare-desktop"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/amarenyo/AetherShare"
+description = "AetherShare — Native Material 3 Expressive Desktop App (Quick Share & AirDrop for Linux)"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+aethershare-airdrop = { path = "../../crates/aethershare-airdrop" }
+aethershare-core = { path = "../../crates/aethershare-core" }
+anyhow = "1.0"
+env_logger = "0.11"
+log = "0.4"
+rand = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sys_metrics = { git = "https://github.com/Martichou/sys_metrics" }
+tauri = { version = "2", features = ["tray-icon"] }
+tokio = { version = "1.43", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }

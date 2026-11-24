@@ -1,0 +1,26 @@
+# Rust build artifacts
+/target/
+/app/src-tauri/target/
+**/*.rs.bk
+
+# Tauri generated capability schemas
+/app/src-tauri/gen/schemas/
+
+# Node / Frontend build artifacts
+/app/ui/node_modules/
+/app/ui/dist/
+*.tsbuildinfo
+
+# Logs & local environment
+*.log
+.env
+.env.local
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

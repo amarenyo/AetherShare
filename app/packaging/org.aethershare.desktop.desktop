@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=AetherShare
+GenericName=Quick Share & AirDrop
+Comment=Send and receive files with Android Quick Share and Apple AirDrop
+Exec=aethershare-desktop
+Icon=aethershare
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;Utility;
+Keywords=QuickShare;NearbyShare;AirDrop;Bluetooth;WiFi;Transfer;
+StartupNotify=true

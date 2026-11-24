@@ -1,0 +1,23 @@
+[package]
+name = "aethershare-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "aethershare"
+path = "src/main.rs"
+
+[dependencies]
+aethershare-airdrop = { path = "../aethershare-airdrop" }
+aethershare-core = { path = "../aethershare-core" }
+anyhow = "1.0"
+env_logger = "0.11"
+log = "0.4"
+rand = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sys_metrics = { git = "https://github.com/Martichou/sys_metrics" }
+tokio = { version = "1.43", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
