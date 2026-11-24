@@ -7,7 +7,7 @@
 //!     (`org.kde.JobViewServer` / `org.kde.JobViewV2`) so Plasma keeps the native progress bar
 //!     alive for the full duration of the transfer (including Stop/Cancel button support!).
 //!   * On GNOME / Dunst / Mako / other desktops: falls back cleanly to `notify-send -r <id> -h int:value:<pct>`.
-//! - Completion notification with a native `[Öffnen]` button (`xdg-open`).
+//! - Completion notification with a native `[Open]` button (`xdg-open`).
 
 use std::collections::HashMap;
 use std::process::Stdio;

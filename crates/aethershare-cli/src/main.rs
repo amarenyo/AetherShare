@@ -26,19 +26,19 @@ USAGE:
     aethershare <COMMAND> [OPTIONS]
 
 COMMANDS:
-    doctor                  Prüft Netzwerk-Interfaces (vmnet/docker Filter), Bluetooth, mDNS & AirDrop
-    daemon                  Startet den Quick Share (mDNS + BLE + L2CAP + Wi-Fi Direct) & AirDrop Daemon
-    ui                      Startet den Daemon inkl. Desktop/Web-UI (http://127.0.0.1:8787) und öffnet das Fenster
-    devices [--timeout N]   Sucht nach Quick Share (WLAN + BLE) und AirDrop Geräten in der Nähe
-    send <ZIEL> <DATEI...>  Sendet Dateien per Quick Share (WLAN / BLE+Wi-Fi Direct) oder AirDrop
+    doctor                  Checks network interfaces (vmnet/docker filter), Bluetooth, mDNS & AirDrop
+    daemon                  Starts the Quick Share (mDNS + BLE + L2CAP + Wi-Fi Direct) & AirDrop daemon
+    ui                      Starts the daemon + web UI (http://127.0.0.1:8787) and opens the browser
+    devices [--timeout N]   Scans for nearby Quick Share (Wi-Fi + BLE) and AirDrop devices
+    send <TARGET> <FILE...> Sends files via Quick Share (Wi-Fi / BLE+Wi-Fi Direct) or AirDrop
 
-OPTIONS FÜR 'daemon' / 'ui':
-    --name <NAME>           Gerätename (Standard: System-Hostname)
-    --port <PORT>           Fester Quick Share TCP-Port (Standard: automatisch)
-    --airdrop-port <PORT>   AirDrop HTTPS/TLS Port (Standard: 8770)
-    --web-port <PORT>       Lokaler Web-UI/Tauri-Bridge Port (Standard: 8787)
-    --download-dir <PFAD>   Zielordner für empfangene Dateien (Standard: ~/Downloads)
-    --auto-accept           Eingehende Transfers automatisch akzeptieren
+OPTIONS FOR 'daemon' / 'ui':
+    --name <NAME>           Device name (default: system hostname)
+    --port <PORT>           Fixed Quick Share TCP port (default: automatic)
+    --airdrop-port <PORT>   AirDrop HTTPS/TLS port (default: 8770)
+    --web-port <PORT>       Local Web-UI/Tauri bridge port (default: 8787)
+    --download-dir <PATH>   Destination directory for received files (default: ~/Downloads)
+    --auto-accept           Automatically accept incoming transfers
 "#
     );
 }
@@ -220,7 +220,7 @@ async fn run_daemon(args: &[String], open_browser: bool) -> Result<(), anyhow::E
         });
     }
 
-    // Interactive desktop notifications ([Annehmen]/[Ablehnen], native KDE JobViewV2 progress bar, [Öffnen])
+    // Interactive desktop notifications ([Accept]/[Decline], native KDE JobViewV2 progress bar, [Open])
     let auto_accept_flag = Arc::new(AtomicBool::new(auto_accept));
     aethershare_core::notifications::spawn_transfer_notifications(
         msg_tx.clone(),

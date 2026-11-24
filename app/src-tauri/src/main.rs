@@ -94,7 +94,7 @@ fn main() {
             }
         }
 
-        // Interactive desktop notifications ([Annehmen]/[Ablehnen], native KDE JobViewV2 progress bar, [Öffnen])
+        // Interactive desktop notifications ([Accept]/[Decline], native KDE JobViewV2 progress bar, [Open])
         aethershare_core::notifications::spawn_transfer_notifications(
             msg_tx.clone(),
             auto_accept.clone(),

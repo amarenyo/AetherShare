@@ -1,5 +1,5 @@
 > [!NOTE]
-> **Vibecoded with [Antigravity](https://antigravity.google/)** — Dieses Projekt wurde mit Antigravity gevibecoded. / This project was vibecoded with Antigravity.
+> **Vibecoded with [Antigravity](https://antigravity.google/)** — This project was vibecoded with Antigravity.
 
 # AetherShare
 
