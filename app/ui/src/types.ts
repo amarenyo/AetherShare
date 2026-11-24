@@ -21,6 +21,7 @@ export interface StatusResponse {
   system_accent?: string | null;
   system_color_scheme?: 'dark' | 'light' | null;
   system_lang?: 'de' | 'en' | null;
+  version?: string;
 }
 
 export interface EndpointInfo {

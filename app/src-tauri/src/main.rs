@@ -233,6 +233,7 @@ struct StatusResponse {
     system_accent: Option<String>,
     system_color_scheme: Option<String>,
     system_lang: String,
+    version: String,
 }
 
 #[derive(Deserialize)]
@@ -397,6 +398,7 @@ async fn handle_conn(
                 system_accent,
                 system_color_scheme,
                 system_lang: aethershare_core::i18n::detect_system_lang().code().to_string(),
+                version: aethershare_core::APP_VERSION.to_string(),
             };
             write_json(&mut stream, &serde_json::to_vec(&status)?).await?;
         }

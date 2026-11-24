@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v0.1.0). Leave empty to use v<Cargo.toml version>."
+        description: "Optional override tag (e.g. v0.2.0). Leave empty to use root VERSION file."
         required: false
         type: string
 
@@ -25,19 +25,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Determine release tag and semver
+      - name: Determine release tag and semver from VERSION
         id: meta
         shell: bash
         run: |
+          CODE_VER=$(tr -d '[:space:]' < VERSION | sed 's/^[vV]//')
           if [ "${{ github.event_name }}" = "push" ]; then
             TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+            if [ "${VERSION}" != "${CODE_VER}" ]; then
+              echo "::warning::Tag (${VERSION}) differs from VERSION file (${CODE_VER}); overriding VERSION in build to match tag."
+            fi
           elif [ -n "${{ inputs.tag }}" ]; then
             TAG="${{ inputs.tag }}"
+            VERSION="${TAG#v}"
           else
-            VER=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')
-            TAG="v${VER}"
+            python3 scripts/sync-version.py --check
+            VERSION="${CODE_VER}"
+            TAG="v${VERSION}"
           fi
-          VERSION="${TAG#v}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved release tag: ${TAG} (version: ${VERSION})"
@@ -90,10 +96,11 @@ jobs:
           key: tauri
           workspaces: app/src-tauri
 
-      - name: Sync version into Tauri config
+      - name: Sync release version into VERSION & Tauri config
         env:
           RELEASE_VERSION: ${{ needs.resolve-version.outputs.version }}
         run: |
+          printf '%s\n' "${RELEASE_VERSION}" > VERSION
           python3 - <<'PY'
           import json, os
           p = "app/src-tauri/tauri.conf.json"
@@ -170,6 +177,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ needs.resolve-version.outputs.version }}
         run: |
+          printf '%s\n' "${RELEASE_VERSION}" > VERSION
           useradd -m builder
           mkdir -p /tmp/arch-build "AetherShare-${RELEASE_VERSION}"
 

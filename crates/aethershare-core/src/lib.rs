@@ -30,10 +30,12 @@ pub mod manager;
 pub mod net_filter;
 pub mod notifications;
 pub mod utils;
+pub mod version;
 
 pub use hdl::{EndpointInfo, OutboundPayload, TransferState, Visibility};
 pub use manager::SendInfo;
 pub use utils::DeviceType;
+pub use version::APP_VERSION;
 
 pub use aethershare_proto::location_nearby_connections;
 pub use aethershare_proto::securegcm;

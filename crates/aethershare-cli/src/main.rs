@@ -19,8 +19,9 @@ use tokio_util::sync::CancellationToken;
 mod web_ui;
 
 fn print_usage() {
+    let ver = aethershare_core::APP_VERSION;
     println!(
-        r#"AetherShare v0.1.0 — Open-Source Quick Share & AirDrop Suite for Linux
+        r#"AetherShare v{ver} — Open-Source Quick Share & AirDrop Suite for Linux
 
 USAGE:
     aethershare <COMMAND> [OPTIONS]
@@ -31,6 +32,7 @@ COMMANDS:
     ui                      Starts the daemon + web UI (http://127.0.0.1:8787) and opens the browser
     devices [--timeout N]   Scans for nearby Quick Share (Wi-Fi + BLE) and AirDrop devices
     send <TARGET> <FILE...> Sends files via Quick Share (Wi-Fi / BLE+Wi-Fi Direct) or AirDrop
+    version, --version, -V  Prints the installed AetherShare version
 
 OPTIONS FOR 'daemon' / 'ui':
     --name <NAME>           Device name (default: system hostname)
@@ -63,6 +65,10 @@ async fn main() -> Result<(), anyhow::Error> {
         "ui" => run_daemon(&args[1..], true).await,
         "devices" => run_devices(&args[1..]).await,
         "send" => run_send(&args[1..]).await,
+        "version" | "--version" | "-V" => {
+            println!("AetherShare {}", aethershare_core::APP_VERSION);
+            Ok(())
+        }
         _ => {
             print_usage();
             Ok(())

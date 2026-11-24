@@ -190,6 +190,11 @@ export default function App() {
 
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [showDevInfo, setShowDevInfo] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<{
+    state: 'idle' | 'checking' | 'latest' | 'available' | 'error';
+    latestVersion?: string;
+    releaseUrl?: string;
+  }>({ state: 'idle' });
   const [scanning, setScanning] = useState(false);
   const [devices, setDevices] = useState<Record<string, EndpointInfo>>({});
   const [queuedFiles, setQueuedFiles] = useState<PickedFile[]>([]);
@@ -257,6 +262,48 @@ export default function App() {
       // ignore during startup
     }
   }, []);
+
+  const handleCheckUpdates = useCallback(async () => {
+    const currentVer = status?.version || '0.1.0';
+    setUpdateInfo({ state: 'checking' });
+    try {
+      const res = await fetch(
+        'https://api.github.com/repos/amarenyo/AetherShare/releases/latest',
+        { headers: { Accept: 'application/vnd.github+json' } }
+      );
+      if (res.status === 404) {
+        // No release published yet — current build is the latest
+        setUpdateInfo({ state: 'latest', latestVersion: currentVer });
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as { tag_name?: string; html_url?: string };
+      const latestVer = (data.tag_name || '').replace(/^[vV]/, '').trim();
+      const parse = (v: string) =>
+        v
+          .split('-')[0]
+          .split('.')
+          .map((n) => parseInt(n, 10) || 0);
+      const a = parse(latestVer);
+      const b = parse(currentVer);
+      const newer =
+        a[0] > b[0] ||
+        (a[0] === b[0] && a[1] > b[1]) ||
+        (a[0] === b[0] && a[1] === b[1] && (a[2] || 0) > (b[2] || 0));
+      if (latestVer && newer) {
+        setUpdateInfo({
+          state: 'available',
+          latestVersion: latestVer,
+          releaseUrl:
+            data.html_url || 'https://github.com/amarenyo/AetherShare/releases/latest',
+        });
+      } else {
+        setUpdateInfo({ state: 'latest', latestVersion: currentVer });
+      }
+    } catch {
+      setUpdateInfo({ state: 'error' });
+    }
+  }, [status?.version]);
 
   useEffect(() => {
     refreshStatus();
@@ -1178,6 +1225,53 @@ export default function App() {
                 </div>
               </md-outlined-card>
 
+              {/* About & Version */}
+              <md-outlined-card>
+                <div
+                  className="card-pad"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 16,
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div>
+                    <div className="m3-title-medium">{tr.aboutTitle}</div>
+                    <div
+                      className="m3-body-medium"
+                      style={{ color: 'var(--md-sys-color-on-surface-variant)', marginTop: 2 }}
+                    >
+                      {updateInfo.state === 'checking'
+                        ? tr.checkingUpdates
+                        : updateInfo.state === 'available' && updateInfo.latestVersion
+                          ? tr.updateAvailable(updateInfo.latestVersion)
+                          : updateInfo.state === 'latest'
+                            ? tr.upToDate(status?.version || '0.1.0')
+                            : updateInfo.state === 'error'
+                              ? tr.updateCheckFailed
+                              : tr.versionLabel(status?.version || '—')}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {updateInfo.state === 'available' && updateInfo.releaseUrl && (
+                      <md-filled-button onClick={() => openPathNative(updateInfo.releaseUrl!)}>
+                        <span slot="icon"><Icon name="sparkle" size={18} /></span>
+                        {tr.openReleaseBtn}
+                      </md-filled-button>
+                    )}
+                    <md-filled-tonal-button
+                      disabled={updateInfo.state === 'checking' || undefined}
+                      onClick={handleCheckUpdates}
+                    >
+                      <span slot="icon"><Icon name="refresh" size={18} /></span>
+                      {tr.checkUpdatesBtn}
+                    </md-filled-tonal-button>
+                  </div>
+                </div>
+              </md-outlined-card>
+
               {/* Hidden Developer Information Button */}
               <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
                 <md-outlined-button
@@ -1196,6 +1290,10 @@ export default function App() {
                   <div className="card-pad">
                     <div className="m3-title-medium" style={{ marginBottom: 12 }}>
                       {tr.devInfoTitle}
+                    </div>
+                    <div className="diag-row">
+                      <span className="m3-label-large">{tr.devVersion}</span>
+                      <span className="m3-mono">v{status?.version || '—'}</span>
                     </div>
                     <div className="diag-row">
                       <span className="m3-label-large">{tr.devQsPort}</span>

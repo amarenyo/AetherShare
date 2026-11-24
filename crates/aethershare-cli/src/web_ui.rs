@@ -32,6 +32,7 @@ struct StatusResponse {
     system_accent: Option<String>,
     system_color_scheme: Option<String>,
     system_lang: String,
+    version: String,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +215,7 @@ async fn handle_web_conn(
                 system_accent,
                 system_color_scheme,
                 system_lang: aethershare_core::i18n::detect_system_lang().code().to_string(),
+                version: aethershare_core::APP_VERSION.to_string(),
             };
             let json = serde_json::to_vec(&status)?;
             write_response(&mut stream, 200, "application/json", &json).await?;

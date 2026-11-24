@@ -82,6 +82,7 @@ export interface Translations {
   devInfoShow: string;
   devInfoHide: string;
   devInfoTitle: string;
+  devVersion: string;
   devQsPort: string;
   devAdPort: string;
   devActiveIps: string;
@@ -90,6 +91,14 @@ export interface Translations {
   devInterfaces: string;
   devActive: string;
   devFiltered: string;
+  aboutTitle: string;
+  versionLabel: (v: string) => string;
+  checkUpdatesBtn: string;
+  checkingUpdates: string;
+  upToDate: (v: string) => string;
+  updateAvailable: (v: string) => string;
+  openReleaseBtn: string;
+  updateCheckFailed: string;
 
   // Snackbars
   snackItemsAdded: (count: number) => string;
@@ -178,6 +187,7 @@ const DE: Translations = {
   devInfoShow: 'Entwicklerinformationen',
   devInfoHide: 'Entwicklerinformationen ausblenden',
   devInfoTitle: 'Entwicklerinformationen',
+  devVersion: 'App-Version',
   devQsPort: 'Quick Share TCP-Port',
   devAdPort: 'AirDrop HTTPS-Port',
   devActiveIps: 'Aktive LAN-IPs',
@@ -186,6 +196,14 @@ const DE: Translations = {
   devInterfaces: 'Netzwerk-Interfaces',
   devActive: 'Aktiv',
   devFiltered: 'Gefiltert',
+  aboutTitle: 'Über AetherShare',
+  versionLabel: (v) => `Version ${v}`,
+  checkUpdatesBtn: 'Nach Updates suchen',
+  checkingUpdates: 'Prüfe auf Updates…',
+  upToDate: (v) => `Aktuell (v${v})`,
+  updateAvailable: (v) => `Update verfügbar: v${v}`,
+  openReleaseBtn: 'Release öffnen',
+  updateCheckFailed: 'Update-Prüfung fehlgeschlagen',
 
   snackItemsAdded: (n) => (n === 1 ? '1 Element hinzugefügt' : `${n} Elemente hinzugefügt`),
   snackFilesAdded: (n) => (n === 1 ? '1 Datei hinzugefügt' : `${n} Dateien hinzugefügt`),
@@ -273,6 +291,7 @@ const EN: Translations = {
   devInfoShow: 'Developer information',
   devInfoHide: 'Hide developer information',
   devInfoTitle: 'Developer information',
+  devVersion: 'App version',
   devQsPort: 'Quick Share TCP port',
   devAdPort: 'AirDrop HTTPS port',
   devActiveIps: 'Active LAN IPs',
@@ -281,6 +300,14 @@ const EN: Translations = {
   devInterfaces: 'Network interfaces',
   devActive: 'Active',
   devFiltered: 'Filtered',
+  aboutTitle: 'About AetherShare',
+  versionLabel: (v) => `Version ${v}`,
+  checkUpdatesBtn: 'Check for updates',
+  checkingUpdates: 'Checking for updates…',
+  upToDate: (v) => `Up to date (v${v})`,
+  updateAvailable: (v) => `Update available: v${v}`,
+  openReleaseBtn: 'Open release',
+  updateCheckFailed: 'Could not check for updates',
 
   snackItemsAdded: (n) => (n === 1 ? '1 item added' : `${n} items added`),
   snackFilesAdded: (n) => (n === 1 ? '1 file added' : `${n} files added`),
