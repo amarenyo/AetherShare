@@ -31,7 +31,9 @@
     "active": true,
     "targets": ["rpm", "deb", "appimage"],
     "icon": ["icons/icon.png"],
-    "category": "Network",
+    "category": "Utility",
+    "publisher": "amarenyo",
+    "homepage": "https://github.com/amarenyo/AetherShare",
     "shortDescription": "Open-Source Quick Share & AirDrop for Linux (Material 3 Expressive)",
     "linux": {
       "deb": {

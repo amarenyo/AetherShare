@@ -23,7 +23,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Determine release tag and semver from VERSION
         id: meta
@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Linux build dependencies
         run: |
@@ -76,7 +76,7 @@ jobs:
             libfuse2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -137,7 +137,7 @@ jobs:
           ls -lh dist-bundles/
 
       - name: Upload AppImage, DEB & RPM artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-deb-rpm-appimage
           path: dist-bundles/*
@@ -151,7 +151,7 @@ jobs:
       image: archlinux:latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Arch Linux build dependencies
         run: |
@@ -203,7 +203,7 @@ jobs:
           ls -lh dist-arch/
 
       - name: Upload Arch package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-arch-pkg
           path: dist-arch/*.pkg.tar.zst
@@ -218,7 +218,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all built packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           merge-multiple: true
@@ -230,7 +230,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Create / Update GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.resolve-version.outputs.tag }}
           name: AetherShare ${{ needs.resolve-version.outputs.tag }}
