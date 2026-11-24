@@ -1,5 +1,5 @@
 > [!NOTE]
-> **Vibecoded with [Antigravity](https://antigravity.google/)** — This project was vibecoded with Antigravity.
+> **Vibecoded with [Antigravity](https://antigravity.google/)** — This project was vibecoded with Antigravity. I just needed a client on my fedora laptop so i just told antigravity to build one. It is pretty good tho.
 
 # AetherShare
 
