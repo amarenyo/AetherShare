@@ -1,0 +1,69 @@
+# Maintainer: amarenyo <https://github.com/amarenyo/AetherShare>
+pkgname=aethershare
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Open-Source Android Quick Share & Apple AirDrop Desktop App + CLI for Linux"
+arch=('x86_64')
+url="https://github.com/amarenyo/AetherShare"
+license=('GPL-3.0-or-later')
+depends=(
+  'webkit2gtk-4.1'
+  'gtk3'
+  'libsoup3'
+  'librsvg'
+  'libayatana-appindicator'
+  'bluez'
+  'networkmanager'
+  'dbus'
+)
+optdepends=(
+  'libnotify: desktop notifications on non-KDE desktop environments'
+  'zenity: native file and folder picker dialogs on GTK desktops'
+  'kdialog: native file and folder picker dialogs on KDE Plasma'
+)
+makedepends=(
+  'rust'
+  'nodejs'
+  'npm'
+  'protobuf'
+  'git'
+)
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/amarenyo/AetherShare/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/AetherShare-$pkgver"
+
+  # 1. Build Material 3 Expressive frontend bundle
+  cd app/ui
+  npm ci --no-audit --no-fund
+  npm run build
+
+  # 2. Build CLI binary
+  cd "$srcdir/AetherShare-$pkgver"
+  cargo build --release --locked -p aethershare-cli
+
+  # 3. Build native Tauri v2 desktop binary
+  cd "$srcdir/AetherShare-$pkgver/app/src-tauri"
+  cargo build --release --locked
+}
+
+package() {
+  cd "$srcdir/AetherShare-$pkgver"
+
+  install -Dm755 "app/src-tauri/target/release/aethershare-desktop" \
+    "$pkgdir/usr/bin/aethershare-desktop"
+  install -Dm755 "target/release/aethershare" \
+    "$pkgdir/usr/bin/aethershare"
+
+  # Desktop entry matching GTK app_id so KDE/Wayland resolves the app icon
+  install -Dm644 "app/packaging/org.aethershare.desktop.desktop" \
+    "$pkgdir/usr/share/applications/aethershare-desktop.desktop"
+
+  # Application icons
+  install -Dm644 "app/src-tauri/icons/icon.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/aethershare.svg"
+  install -Dm644 "app/src-tauri/icons/icon.png" \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/aethershare.png"
+}

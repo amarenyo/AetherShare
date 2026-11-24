@@ -9,3 +9,4 @@ Type=Application
 Categories=Network;FileTransfer;Utility;
 Keywords=QuickShare;NearbyShare;AirDrop;Bluetooth;WiFi;Transfer;
 StartupNotify=true
+StartupWMClass=aethershare-desktop

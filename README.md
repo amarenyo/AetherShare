@@ -1,5 +1,5 @@
 > [!NOTE]
-> **Vibecoded with [Antigravity](https://antigravity.google/)** — This project was vibecoded with Antigravity. I just needed a client on my fedora laptop so i just told antigravity to build one. It is pretty good tho.
+> **Vibecoded with [Antigravity](https://antigravity.google/)** — This project was vibecoded with Antigravity.
 
 # AetherShare
 
@@ -44,6 +44,15 @@
 - `crates/aethershare-cli` — CLI tool & embedded web UI server
 - `app/ui` — React + TypeScript + `@material/web` frontend (bundled via Vite)
 - `app/src-tauri` — Native Tauri v2 Linux desktop app with system tray & OS drag-and-drop
+
+## Installation (Pre-built Releases)
+
+Download the latest Linux packages from [GitHub Releases](https://github.com/amarenyo/AetherShare/releases):
+
+- **AppImage (universal):** `chmod +x AetherShare-*.AppImage && ./AetherShare-*.AppImage`
+- **Fedora / openSUSE / RHEL (`.rpm`):** `sudo dnf install ./AetherShare-*.rpm`
+- **Ubuntu / Debian / Mint (`.deb`):** `sudo apt install ./AetherShare_*.deb`
+- **Arch Linux / EndeavourOS / CachyOS (`.pkg.tar.zst`):** `sudo pacman -U ./aethershare-*.pkg.tar.zst`
 
 ## Building from Source
 
