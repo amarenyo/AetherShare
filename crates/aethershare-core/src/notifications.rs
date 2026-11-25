@@ -426,6 +426,11 @@ pub fn spawn_transfer_notifications(
 
             match state {
                 TransferState::WaitingForUserConsent => {
+                    if client.kind != TransferKind::Inbound {
+                        // Outbound transfer waiting for the remote device to accept — do not
+                        // pop up an incoming Accept/Decline prompt on our own desktop.
+                        continue;
+                    }
                     info!(
                         ">>> EINGEHENDER TRANSFER von '{peer}' (PIN: {pin}): {files_desc} (ID: {})",
                         cm.id
@@ -454,6 +459,12 @@ pub fn spawn_transfer_notifications(
                         String::new()
                     };
 
+                    let body_text = if pin == "-" || pin.is_empty() {
+                        format!("{files_for_notif}{size_suffix}")
+                    } else {
+                        format!("{files_for_notif}{size_suffix}\nPIN: {pin}")
+                    };
+
                     let handle = tokio::spawn(async move {
                         let s = i18n::strings();
                         let Ok(mut child) = tokio::process::Command::new("notify-send")
@@ -472,7 +483,7 @@ pub fn spawn_transfer_notifications(
                                 "-A",
                                 &format!("decline={}", s.decline),
                                 &format!("{} {peer_for_notif}", s.incoming_title_prefix),
-                                &format!("{files_for_notif}{size_suffix}\nPIN: {pin}"),
+                                &body_text,
                             ])
                             .stdout(Stdio::piped())
                             .stderr(Stdio::null())

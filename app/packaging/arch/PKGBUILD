@@ -1,6 +1,6 @@
 # Maintainer: amarenyo <https://github.com/amarenyo/AetherShare>
 pkgname=aethershare
-pkgver=0.2.2
+pkgver=0.2.3
 pkgrel=1
 pkgdesc="Open-Source Android Quick Share & Apple AirDrop (AWDL) Desktop App + CLI for Linux"
 arch=('x86_64')

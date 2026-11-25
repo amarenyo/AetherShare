@@ -426,8 +426,20 @@ impl AirDropManager {
 
         emit(TransferState::WaitingForUserConsent, 0, total_size);
 
-        // Keep Apple BLE wake-up active during send in case the receiver needs it
-        let _ble_guard = start_apple_ble_advert().await;
+        // Only start an extra Apple BLE wake-up advert if discovery doesn't already hold one
+        let has_disc_ble = {
+            let guard = self.inner.lock().await;
+            guard
+                .as_ref()
+                .and_then(|s| s.disc_ctk.as_ref())
+                .map(|c| !c.is_cancelled())
+                .unwrap_or(false)
+        };
+        let _ble_guard = if has_disc_ble {
+            None
+        } else {
+            start_apple_ble_advert().await
+        };
 
         let abs_files: Vec<PathBuf> = files
             .into_iter()
@@ -477,7 +489,32 @@ impl AirDropManager {
             file_names.len(),
             peer_name
         );
-        let outcome = sender.send(addr, &payload, flags, Some(ev_tx)).await;
+
+        // On Intel exclusive mode (channel 6), an iPhone may need an extra AWDL slot
+        // before accepting the TLS connection — retry transient connect timeouts/refusals.
+        let mut outcome = Err(io::Error::new(io::ErrorKind::TimedOut, "not attempted"));
+        for attempt in 1..=3 {
+            outcome = sender.send(addr, &payload, flags, Some(ev_tx.clone())).await;
+            match &outcome {
+                Err(e)
+                    if attempt < 3
+                        && matches!(
+                            e.kind(),
+                            io::ErrorKind::TimedOut | io::ErrorKind::ConnectionRefused
+                        ) =>
+                {
+                    if self.inner.lock().await.is_none() {
+                        break;
+                    }
+                    info!(
+                        "AirDropManager: send attempt {attempt}/3 to {peer_name} got {e}; retrying..."
+                    );
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                }
+                _ => break,
+            }
+        }
+        drop(ev_tx);
         let _ = progress_task.await;
 
         match outcome {
