@@ -315,7 +315,7 @@ async fn handle_web_conn(
         }
         ("POST", "/api/discovery/start") => {
             info!("UI: start_discovery");
-            {
+            if !airdrop.is_exclusive_active().await {
                 let mut guard = rqs.lock().unwrap();
                 let _ = guard.discovery(disc_tx.clone());
             }
@@ -325,10 +325,13 @@ async fn handle_web_conn(
         ("POST", "/api/discovery/stop") => {
             info!("UI: stop_discovery");
             rqs.lock().unwrap().stop_discovery();
-            airdrop.stop_discovery().await;
+            if !airdrop.is_exclusive_active().await {
+                airdrop.stop_discovery().await;
+            }
             write_response(&mut stream, 200, "application/json", br#"{"ok":true}"#).await?;
         }
         ("POST", "/api/airdrop/enable") => {
+            rqs.lock().unwrap().stop_discovery();
             match airdrop.enable().await {
                 Ok(st) => {
                     let body = serde_json::to_vec(&serde_json::json!({ "ok": true, "airdrop": st }))?;

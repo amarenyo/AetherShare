@@ -529,44 +529,67 @@ pub async fn dial(
 /// outbound -> `[u32 len][OfflineFrame]` wrapped as `[u32][svc hash][entry]`;
 /// phone -> service-hash entries unwrapped back to the duplex (and acked), the
 /// client-role twin of `l2cap::serve_weave_messages`.
-async fn bridge(mut stream: Stream, local: tokio::io::DuplexStream, mut leftover: Vec<u8>) {
+async fn bridge(mut stream: Stream, local: tokio::io::DuplexStream, leftover: Vec<u8>) {
     let (mut local_rd, mut local_wr) = tokio::io::split(local);
+    let mut in_buf: Vec<u8> = leftover;
     let mut out_buf: Vec<u8> = Vec::new();
     let mut rbuf = [0u8; 2048];
+    let mut net_rbuf = [0u8; 4096];
 
-    loop {
-        tokio::select! {
-            frame = read_frame(&mut stream, &mut leftover) => {
-                let msg = match frame {
-                    Ok(Some(m)) => m,
-                    Ok(None) => break,
-                    Err(e) => { debug!("{INNER_NAME}: read error: {e}"); break; }
-                };
-                if msg.len() < 3 {
-                    continue;
+    'bridge: loop {
+        // Drain all complete [u32 BE len][payload] frames currently buffered.
+        loop {
+            if in_buf.len() < 4 {
+                break;
+            }
+            let len = u32::from_be_bytes(in_buf[..4].try_into().unwrap()) as usize;
+            if len == 0 || len > 1 << 20 {
+                warn!("{INNER_NAME}: implausible L2CAP frame length {len}");
+                break 'bridge;
+            }
+            if in_buf.len() < 4 + len {
+                break;
+            }
+            in_buf.drain(..4);
+            let msg: Vec<u8> = in_buf.drain(..len).collect();
+            if msg.len() < 3 {
+                continue;
+            }
+            if msg[..3] == [0, 0, 0] {
+                let ctrl = if msg.len() >= 5 && msg[3] == 0x08 { msg[4] } else { 0 };
+                if ctrl == SOCKET_CTRL_DISCONNECTION {
+                    debug!("{INNER_NAME}: peer sent DISCONNECTION");
+                    break 'bridge;
                 }
-                if msg[..3] == [0, 0, 0] {
-                    let ctrl = if msg.len() >= 5 && msg[3] == 0x08 { msg[4] } else { 0 };
-                    if ctrl == SOCKET_CTRL_DISCONNECTION {
-                        debug!("{INNER_NAME}: phone sent DISCONNECTION");
-                        break;
+            } else if msg[..3] == SVC_HASH {
+                // Payload is the [u32 len][OfflineFrame] the outbound handler reads.
+                if local_wr.write_all(&msg[3..]).await.is_err() {
+                    break 'bridge;
+                }
+                // Acknowledge or the peer's sender stalls.
+                if stream.write_all(&build_ack_frame(msg.len() - 3)).await.is_err() {
+                    break 'bridge;
+                }
+            } else {
+                debug!("{INNER_NAME}: frame for foreign service {}", hex::encode(&msg[..3]));
+            }
+        }
+
+        // Both branches are 100% cancel-safe.
+        tokio::select! {
+            r = stream.read(&mut net_rbuf) => {
+                match r {
+                    Ok(0) => break 'bridge,
+                    Ok(n) => in_buf.extend_from_slice(&net_rbuf[..n]),
+                    Err(e) => {
+                        debug!("{INNER_NAME}: read error: {e}");
+                        break 'bridge;
                     }
-                } else if msg[..3] == SVC_HASH {
-                    // Payload is the [u32 len][OfflineFrame] the outbound handler reads.
-                    if local_wr.write_all(&msg[3..]).await.is_err() {
-                        break;
-                    }
-                    // Acknowledge or the phone's sender stalls.
-                    if stream.write_all(&build_ack_frame(msg.len() - 3)).await.is_err() {
-                        break;
-                    }
-                } else {
-                    debug!("{INNER_NAME}: frame for foreign service {}", hex::encode(&msg[..3]));
                 }
             }
             r = local_rd.read(&mut rbuf) => {
                 match r {
-                    Ok(0) => break,
+                    Ok(0) => break 'bridge,
                     Ok(n) => {
                         out_buf.extend_from_slice(&rbuf[..n]);
                         // Re-frame each complete [u32 len][entry] the outbound side wrote.
@@ -588,7 +611,7 @@ async fn bridge(mut stream: Stream, local: tokio::io::DuplexStream, mut leftover
                             }
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => break 'bridge,
                 }
             }
         }

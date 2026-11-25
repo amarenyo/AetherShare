@@ -324,7 +324,7 @@ pub(crate) async fn send_frame(stream: &mut Stream, packet: &[u8]) -> Result<(),
 /// through an in-memory duplex exactly like the GATT weave socket.
 async fn serve_weave_messages(
     mut stream: Stream,
-    mut leftover: Vec<u8>,
+    leftover: Vec<u8>,
     first_msg: Option<Vec<u8>>,
     sender: Sender<ChannelMessage>,
     tcp_port: u16,
@@ -340,13 +340,32 @@ async fn serve_weave_messages(
     // Introduce ourselves right away; the phone waits ~4s for this.
     stream.write_all(&build_intro_frame()).await?;
 
+    let mut in_buf: Vec<u8> = leftover;
     let mut out_buf: Vec<u8> = Vec::new();
     let mut rbuf = [0u8; 2048];
+    let mut net_rbuf = [0u8; 4096];
     let mut pending_msg = first_msg;
 
-    loop {
-        // Process a message from the phone (the first one arrives pre-read).
-        if let Some(msg) = pending_msg.take() {
+    'session: loop {
+        // Process any pre-read or freshly framed messages first.
+        while let Some(msg) = pending_msg.take().or_else(|| {
+            if in_buf.len() < 4 {
+                return None;
+            }
+            let len = u32::from_be_bytes(in_buf[..4].try_into().unwrap()) as usize;
+            if len == 0 || len > 1 << 20 {
+                return Some(Vec::new()); // sentinel for invalid frame length
+            }
+            if in_buf.len() < 4 + len {
+                return None;
+            }
+            in_buf.drain(..4);
+            Some(in_buf.drain(..len).collect())
+        }) {
+            if msg.is_empty() {
+                warn!("{INNER_NAME}: implausible L2CAP frame length; ending session");
+                break 'session;
+            }
             if msg.len() < 3 {
                 continue;
             }
@@ -360,7 +379,7 @@ async fn serve_weave_messages(
                     SOCKET_CTRL_INTRODUCTION => debug!("{INNER_NAME}: INTRODUCTION"),
                     SOCKET_CTRL_DISCONNECTION => {
                         debug!("{INNER_NAME}: DISCONNECTION");
-                        break;
+                        break 'session;
                     }
                     _ => debug!("{INNER_NAME}: control {}", hex::encode(&msg)),
                 }
@@ -368,7 +387,7 @@ async fn serve_weave_messages(
                 // The payload is the [u32 len][OfflineFrame] entry the
                 // inbound handler reads natively.
                 if local_wr.write_all(&msg[3..]).await.is_err() {
-                    break;
+                    break 'session;
                 }
                 // Acknowledge the received bytes or the phone's sender stalls.
                 stream.write_all(&build_ack_frame(msg.len() - 3)).await?;
@@ -378,19 +397,21 @@ async fn serve_weave_messages(
                     hex::encode(&msg[..3])
                 );
             }
-            continue;
         }
 
+        // Both branches are 100% cancel-safe (AsyncReadExt::read never drops bytes
+        // when another tokio::select! branch completes first).
         tokio::select! {
-            frame = read_frame(&mut stream, &mut leftover) => {
-                match frame? {
-                    Some(msg) => pending_msg = Some(msg),
-                    None => break,
+            r = stream.read(&mut net_rbuf) => {
+                match r {
+                    Ok(0) => break 'session,
+                    Ok(n) => in_buf.extend_from_slice(&net_rbuf[..n]),
+                    Err(e) => return Err(e.into()),
                 }
             }
             r = local_rd.read(&mut rbuf) => {
                 match r {
-                    Ok(0) => break,
+                    Ok(0) => break 'session,
                     Ok(n) => {
                         out_buf.extend_from_slice(&rbuf[..n]);
                         loop {
@@ -405,7 +426,7 @@ async fn serve_weave_messages(
                             stream.write_all(&frame).await?;
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => break 'session,
                 }
             }
         }

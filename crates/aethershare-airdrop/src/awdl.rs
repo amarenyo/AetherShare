@@ -106,6 +106,7 @@ struct ActiveSession {
     link: LinkInfo,
     session_ctk: CancellationToken,
     disc_ctk: Option<CancellationToken>,
+    _scan_suppressor: aethershare_core::hdl::BleScanSuppressor,
 }
 
 /// Manages the real AWDL AirDrop radio lease, receiver, discovery, Apple BLE wake-up,
@@ -120,6 +121,8 @@ pub struct AirDropManager {
     disc_tx: broadcast::Sender<EndpointInfo>,
     /// Stores discovered AirDrop peer flags keyed by endpoint id (`airdrop://...`).
     peer_flags: Arc<Mutex<HashMap<String, u32>>>,
+    /// Caches discovered Apple AirDrop peers so UI reloads re-emit them without killing BLE.
+    discovered_peers: Arc<Mutex<HashMap<String, EndpointInfo>>>,
 }
 
 impl AirDropManager {
@@ -140,11 +143,21 @@ impl AirDropManager {
             msg_tx,
             disc_tx,
             peer_flags: Arc::new(Mutex::new(HashMap::new())),
+            discovered_peers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub async fn set_device_name(&self, name: String) {
         *self.device_name.lock().await = name;
+    }
+
+    /// True while AirDrop is running in Exclusive mode (Wi-Fi LAN is paused for `awdl0`).
+    pub async fn is_exclusive_active(&self) -> bool {
+        let active = self.inner.lock().await.is_some();
+        if !active {
+            return false;
+        }
+        self.cached_status.lock().await.mode == "exclusive"
     }
 
     /// Returns the last probed status updated with current `active` state.
@@ -242,6 +255,7 @@ impl AirDropManager {
                 link,
                 session_ctk,
                 disc_ctk: None,
+                _scan_suppressor: aethershare_core::hdl::BleScanSuppressor::new(),
             });
         }
 
@@ -263,34 +277,72 @@ impl AirDropManager {
                 warn!("AirDropManager: Release({}) returned error: {e}", s.lease_id);
             }
         }
+        // Mark previously discovered AirDrop peers as gone
+        let stale: Vec<EndpointInfo> = self.discovered_peers.lock().await.drain().map(|(_, v)| v).collect();
+        for ep in stale {
+            let _ = self.disc_tx.send(EndpointInfo {
+                id: ep.id,
+                present: Some(false),
+                ..Default::default()
+            });
+        }
         Ok(self.probe().await)
     }
 
     /// Starts scanning for nearby Apple AirDrop receivers (Apple Continuity BLE wake-up
     /// + `awdl0` mDNS browse + AWDL peer `/Discover` probing on port 8770).
-    /// No-op if the AWDL radio is not currently active.
+    ///
+    /// If discovery is already active on the current AWDL session, keeps the continuous
+    /// Apple BLE advert & AWDL browser alive (so iPhones aren't interrupted mid-wakeup)
+    /// and simply re-emits cached peers to the UI.
     pub async fn start_discovery(&self) -> Result<()> {
-        let (radio, link, old_disc) = {
+        let to_start = {
             let mut guard = self.inner.lock().await;
             let Some(sess) = guard.as_mut() else {
                 return Ok(());
             };
-            let new_disc = sess.session_ctk.child_token();
-            let old = sess.disc_ctk.replace(new_disc.clone());
-            (sess.radio.clone(), sess.link.clone(), (old, new_disc))
+            if sess
+                .disc_ctk
+                .as_ref()
+                .map(|c| !c.is_cancelled())
+                .unwrap_or(false)
+            {
+                None
+            } else {
+                let new_disc = sess.session_ctk.child_token();
+                sess.disc_ctk = Some(new_disc.clone());
+                Some((sess.radio.clone(), sess.link.clone(), new_disc))
+            }
         };
 
-        if let Some(old) = old_disc.0 {
-            old.cancel();
+        // Re-emit any already-discovered Apple peers (e.g. after UI reload)
+        {
+            let peers = self.discovered_peers.lock().await;
+            for ep in peers.values() {
+                let _ = self.disc_tx.send(ep.clone());
+            }
         }
-        let disc_ctk = old_disc.1;
+
+        let Some((radio, link, disc_ctk)) = to_start else {
+            return Ok(());
+        };
+
         let device_name = self.device_name.lock().await.clone();
         let disc_tx = self.disc_tx.clone();
         let peer_flags = self.peer_flags.clone();
+        let discovered_peers = self.discovered_peers.clone();
 
         tokio::spawn(async move {
-            if let Err(e) =
-                run_awdl_discovery(radio, link, device_name, disc_tx, peer_flags, disc_ctk).await
+            if let Err(e) = run_awdl_discovery(
+                radio,
+                link,
+                device_name,
+                disc_tx,
+                peer_flags,
+                discovered_peers,
+                disc_ctk,
+            )
+            .await
             {
                 debug!("AirDropManager: discovery ended: {e}");
             }
@@ -563,7 +615,7 @@ async fn run_awdl_receiver(
 
         match ev {
             ReceiverEvent::Discovered { peer, .. } => {
-                debug!("AirDropManager: discovered by {peer}");
+                info!("AirDropManager: discovered by Apple sender {peer}");
             }
             ReceiverEvent::Request(request) => {
                 let req_id = request.id;
@@ -927,6 +979,7 @@ async fn run_awdl_discovery(
     device_name: String,
     disc_tx: broadcast::Sender<EndpointInfo>,
     peer_flags: Arc<Mutex<HashMap<String, u32>>>,
+    discovered_peers: Arc<Mutex<HashMap<String, EndpointInfo>>>,
     ctk: CancellationToken,
 ) -> Result<()> {
     // BLE-1: Advertise Apple Continuity AirDrop wake-up beacon so nearby iPhones/Macs
@@ -945,6 +998,7 @@ async fn run_awdl_discovery(
     let mdns_sender = sender.clone();
     let mdns_tx = disc_tx.clone();
     let mdns_flags = peer_flags.clone();
+    let mdns_cache = discovered_peers.clone();
     let mdns_seen = seen_addrs.clone();
     let if_index = link.index;
     let mdns_task = tokio::spawn(async move {
@@ -972,6 +1026,7 @@ async fn run_awdl_discovery(
                     found.flags,
                     &mdns_tx,
                     &mdns_flags,
+                    &mdns_cache,
                 )
                 .await;
             } else {
@@ -986,6 +1041,7 @@ async fn run_awdl_discovery(
     let peers_sender = sender.clone();
     let peers_tx = disc_tx.clone();
     let peers_flags = peer_flags.clone();
+    let peers_cache = discovered_peers.clone();
     let peers_seen = seen_addrs.clone();
     let peers_task = tokio::spawn(async move {
         while !peers_ctk.is_cancelled() {
@@ -1015,6 +1071,7 @@ async fn run_awdl_discovery(
                             RECEIVER_FLAGS | SUPPORTS_DVZIP,
                             &peers_tx,
                             &peers_flags,
+                            &peers_cache,
                         )
                         .await;
                     }
@@ -1039,6 +1096,7 @@ async fn emit_discovered_peer(
     flags: u32,
     disc_tx: &broadcast::Sender<EndpointInfo>,
     peer_flags: &Arc<Mutex<HashMap<String, u32>>>,
+    discovered_peers: &Arc<Mutex<HashMap<String, EndpointInfo>>>,
 ) {
     let id = format!("airdrop://[{}%{}]:{}", addr.ip(), addr.scope_id(), addr.port());
     peer_flags.lock().await.insert(id.clone(), flags);
@@ -1056,7 +1114,7 @@ async fn emit_discovered_peer(
 
     let ei = EndpointInfo {
         fullname: id.clone(),
-        id,
+        id: id.clone(),
         name: Some(name),
         ip: Some(format!("{}%{}", addr.ip(), addr.scope_id())),
         port: Some(addr.port().to_string()),
@@ -1066,6 +1124,7 @@ async fn emit_discovered_peer(
         ble_psm: None,
         protocol: Some("airdrop".into()),
     };
+    discovered_peers.lock().await.insert(id, ei.clone());
     info!("AirDropManager: found Apple AirDrop peer {:?}", ei);
     let _ = disc_tx.send(ei);
 }

@@ -496,7 +496,7 @@ async fn handle_conn(
             }
         }
         ("POST", "/api/discovery/start") => {
-            {
+            if !airdrop.is_exclusive_active().await {
                 let mut guard = rqs.lock().unwrap();
                 let _ = guard.discovery(disc_tx.clone());
             }
@@ -505,10 +505,15 @@ async fn handle_conn(
         }
         ("POST", "/api/discovery/stop") => {
             rqs.lock().unwrap().stop_discovery();
-            airdrop.stop_discovery().await;
+            if !airdrop.is_exclusive_active().await {
+                airdrop.stop_discovery().await;
+            }
             write_json(&mut stream, br#"{"ok":true}"#).await?;
         }
         ("POST", "/api/airdrop/enable") => {
+            // Pause Quick Share active BLE/mDNS scan while AirDrop radio starts so BlueZ
+            // advertising and UDP 5353 stay completely free for Apple AWDL + BLE wake-up.
+            rqs.lock().unwrap().stop_discovery();
             match airdrop.enable().await {
                 Ok(st) => {
                     let body = serde_json::to_vec(&serde_json::json!({ "ok": true, "airdrop": st }))?;
