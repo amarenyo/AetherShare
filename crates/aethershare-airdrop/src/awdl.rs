@@ -316,6 +316,12 @@ impl AirDropManager {
         peer_name: String,
         files: Vec<PathBuf>,
     ) -> Result<()> {
+        if self.inner.lock().await.is_none() {
+            return Err(anyhow!(
+                "AirDrop AWDL radio is not active — enable AirDrop mode first"
+            ));
+        }
+
         let addr = parse_airdrop_endpoint_id(&endpoint_id)?;
         let flags = self
             .peer_flags
@@ -386,7 +392,10 @@ impl AirDropManager {
         let progress_task = tokio::spawn(async move {
             while let Some(ev) = ev_rx.recv().await {
                 let (state, ack, tot) = match ev {
-                    SenderEvent::Accepted => (TransferState::SendingFiles, 0, total_size),
+                    SenderEvent::Accepted => {
+                        info!("AirDropManager: {pname_prog} accepted transfer {tid_prog}");
+                        (TransferState::SendingFiles, 0, total_size)
+                    }
                     SenderEvent::Progress(p) => (TransferState::SendingFiles, p.sent, p.total),
                 };
                 let _ = msg_tx_prog.send(ChannelMessage {
@@ -411,24 +420,32 @@ impl AirDropManager {
             }
         });
 
-        info!("AirDropManager: sending {} file(s) to {} ({addr})", file_names.len(), peer_name);
+        info!(
+            "AirDropManager: sending {} file(s) ({total_size} B) to {} ({addr}, flags={flags:#x})",
+            file_names.len(),
+            peer_name
+        );
         let outcome = sender.send(addr, &payload, flags, Some(ev_tx)).await;
         let _ = progress_task.await;
 
         match outcome {
             Ok(Outcome::Delivered) => {
+                info!("AirDropManager: transfer {transfer_id} delivered to {peer_name}");
                 emit(TransferState::Finished, total_size, total_size);
                 Ok(())
             }
             Ok(Outcome::Declined) => {
+                info!("AirDropManager: transfer {transfer_id} declined by {peer_name}");
                 emit(TransferState::Rejected, 0, total_size);
                 Ok(())
             }
             Ok(Outcome::Failed(reason)) => {
+                warn!("AirDropManager: transfer {transfer_id} failed: {reason}");
                 emit(TransferState::Cancelled, 0, total_size);
                 Err(anyhow!("AirDrop transfer failed: {reason}"))
             }
             Err(e) => {
+                warn!("AirDropManager: transfer {transfer_id} error: {e}");
                 emit(TransferState::Disconnected, 0, total_size);
                 Err(anyhow!("AirDrop transfer error: {e}"))
             }
@@ -530,8 +547,10 @@ async fn run_awdl_receiver(
         link.interface, device_name
     );
 
-    // Track metadata per active inbound transfer id
+    // Track metadata & live staging-progress pollers per active inbound transfer id
     let mut meta_map: HashMap<u64, (String, String, Vec<String>, u64)> = HashMap::new();
+    let pollers: Arc<Mutex<HashMap<u64, CancellationToken>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         let ev = tokio::select! {
@@ -573,18 +592,29 @@ async fn run_awdl_receiver(
                             state: Some(TransferState::ReceivingFiles),
                             kind: TransferKind::Inbound,
                             metadata: Some(TransferMetadata {
-                                id: tid,
+                                id: tid.clone(),
                                 source: Some(RemoteDeviceInfo {
-                                    name: sender_name,
+                                    name: sender_name.clone(),
                                     device_type: DeviceType::Phone,
                                 }),
                                 payload_kind: TransferPayloadKind::Files,
-                                payload: Some(TransferPayload::Files(files)),
+                                payload: Some(TransferPayload::Files(files.clone())),
                                 total_bytes,
                                 ..Default::default()
                             }),
                         }),
                     });
+                    let poll_ctk = ctk.child_token();
+                    pollers.lock().await.insert(req_id, poll_ctk.clone());
+                    spawn_staging_progress_poller(
+                        dest_dir.clone(),
+                        tid,
+                        sender_name,
+                        files,
+                        total_bytes,
+                        msg_tx.clone(),
+                        poll_ctk,
+                    );
                     request.accept();
                 } else {
                     let _ = msg_tx.send(ChannelMessage {
@@ -609,6 +639,9 @@ async fn run_awdl_receiver(
                     // Wait asynchronously for UI / KDE notification Accept or Decline
                     let mut rx = msg_tx.subscribe();
                     let tx_reply = msg_tx.clone();
+                    let pollers_clone = pollers.clone();
+                    let poll_parent_ctk = ctk.clone();
+                    let dest_for_poll = dest_dir.clone();
                     tokio::spawn(async move {
                         let decision = tokio::time::timeout(Duration::from_secs(60), async {
                             while let Ok(cm) = rx.recv().await {
@@ -630,18 +663,29 @@ async fn run_awdl_receiver(
                                         state: Some(TransferState::ReceivingFiles),
                                         kind: TransferKind::Inbound,
                                         metadata: Some(TransferMetadata {
-                                            id: tid,
+                                            id: tid.clone(),
                                             source: Some(RemoteDeviceInfo {
-                                                name: sender_name,
+                                                name: sender_name.clone(),
                                                 device_type: DeviceType::Phone,
                                             }),
                                             payload_kind: TransferPayloadKind::Files,
-                                            payload: Some(TransferPayload::Files(files)),
+                                            payload: Some(TransferPayload::Files(files.clone())),
                                             total_bytes,
                                             ..Default::default()
                                         }),
                                     }),
                                 });
+                                let poll_ctk = poll_parent_ctk.child_token();
+                                pollers_clone.lock().await.insert(req_id, poll_ctk.clone());
+                                spawn_staging_progress_poller(
+                                    dest_for_poll,
+                                    tid,
+                                    sender_name,
+                                    files,
+                                    total_bytes,
+                                    tx_reply,
+                                    poll_ctk,
+                                );
                                 request.accept();
                             }
                             _ => {
@@ -670,6 +714,9 @@ async fn run_awdl_receiver(
                 }
             }
             ReceiverEvent::Withdrawn { id } => {
+                if let Some(p) = pollers.lock().await.remove(&id) {
+                    p.cancel();
+                }
                 if let Some((tid, sender_name, files, total_bytes)) = meta_map.remove(&id) {
                     let _ = msg_tx.send(ChannelMessage {
                         id: tid.clone(),
@@ -692,13 +739,21 @@ async fn run_awdl_receiver(
                 }
             }
             ReceiverEvent::Received { id, paths } => {
+                if let Some(p) = pollers.lock().await.remove(&id) {
+                    p.cancel();
+                }
                 let saved: Vec<String> = paths
                     .iter()
                     .map(|p| p.to_string_lossy().to_string())
                     .collect();
-                let (tid, sender_name, files, total_bytes) = meta_map
+                let actual_total: u64 = paths
+                    .iter()
+                    .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+                    .sum();
+                let (tid, sender_name, files, expected_total) = meta_map
                     .remove(&id)
                     .unwrap_or_else(|| (format!("airdrop-in-{id}"), "Apple Device".into(), vec![], 0));
+                let final_total = expected_total.max(actual_total);
                 let _ = msg_tx.send(ChannelMessage {
                     id: tid.clone(),
                     msg: Message::Client(MessageClient {
@@ -714,14 +769,17 @@ async fn run_awdl_receiver(
                             payload: Some(TransferPayload::Files(files)),
                             destination: Some(dest_dir.to_string_lossy().to_string()),
                             saved_paths: Some(saved),
-                            total_bytes,
-                            ack_bytes: total_bytes,
+                            total_bytes: final_total,
+                            ack_bytes: final_total,
                             ..Default::default()
                         }),
                     }),
                 });
             }
             ReceiverEvent::Urls { id, urls } => {
+                if let Some(p) = pollers.lock().await.remove(&id) {
+                    p.cancel();
+                }
                 let (tid, sender_name, _, _) = meta_map
                     .remove(&id)
                     .unwrap_or_else(|| (format!("airdrop-in-{id}"), "Apple Device".into(), vec![], 0));
@@ -744,6 +802,9 @@ async fn run_awdl_receiver(
                 });
             }
             ReceiverEvent::Failed { id, reason } => {
+                if let Some(p) = pollers.lock().await.remove(&id) {
+                    p.cancel();
+                }
                 warn!("AirDropManager: inbound transfer {id} failed: {reason}");
                 if let Some((tid, sender_name, files, total_bytes)) = meta_map.remove(&id) {
                     let _ = msg_tx.send(ChannelMessage {
@@ -771,6 +832,93 @@ async fn run_awdl_receiver(
 
     recv_task.abort();
     Ok(())
+}
+
+/// Polls `owly-airdrop`'s live `.owly-staging-*` extraction directories inside `dest_dir`
+/// every 350 ms so both the UI and KDE `JobViewV2` show smooth inbound byte progress.
+fn spawn_staging_progress_poller(
+    dest_dir: PathBuf,
+    tid: String,
+    sender_name: String,
+    files: Vec<String>,
+    total_bytes: u64,
+    msg_tx: broadcast::Sender<ChannelMessage>,
+    ctk: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut last_bytes: u64 = 0;
+        loop {
+            tokio::select! {
+                _ = ctk.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_millis(350)) => {}
+            }
+            let dir = dest_dir.clone();
+            let written = tokio::task::spawn_blocking(move || sum_owly_staging_bytes(&dir))
+                .await
+                .unwrap_or(0);
+            if written > last_bytes {
+                last_bytes = written;
+                let clamped = if total_bytes > 0 {
+                    written.min(total_bytes.saturating_sub(1))
+                } else {
+                    written
+                };
+                let _ = msg_tx.send(ChannelMessage {
+                    id: tid.clone(),
+                    msg: Message::Client(MessageClient {
+                        state: Some(TransferState::ReceivingFiles),
+                        kind: TransferKind::Inbound,
+                        metadata: Some(TransferMetadata {
+                            id: tid.clone(),
+                            source: Some(RemoteDeviceInfo {
+                                name: sender_name.clone(),
+                                device_type: DeviceType::Phone,
+                            }),
+                            payload_kind: TransferPayloadKind::Files,
+                            payload: Some(TransferPayload::Files(files.clone())),
+                            total_bytes,
+                            ack_bytes: clamped,
+                            ..Default::default()
+                        }),
+                    }),
+                });
+            }
+        }
+    });
+}
+
+fn sum_owly_staging_bytes(dest_dir: &std::path::Path) -> u64 {
+    fn walk_size(path: &std::path::Path) -> u64 {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return 0;
+        };
+        if meta.is_file() {
+            return meta.len();
+        }
+        if meta.is_dir() {
+            let Ok(rd) = std::fs::read_dir(path) else {
+                return 0;
+            };
+            return rd
+                .flatten()
+                .map(|e| walk_size(&e.path()))
+                .sum();
+        }
+        0
+    }
+
+    let Ok(rd) = std::fs::read_dir(dest_dir) else {
+        return 0;
+    };
+    rd.flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with(".owly-staging-"))
+                .unwrap_or(false)
+        })
+        .map(|e| walk_size(&e.path()))
+        .sum()
 }
 
 async fn run_awdl_discovery(

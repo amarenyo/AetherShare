@@ -147,6 +147,73 @@ pub async fn serve_web_ui(
     Ok(())
 }
 
+async fn read_http_request(
+    stream: &mut TcpStream,
+) -> Result<Option<(String, String, String)>, anyhow::Error> {
+    let mut raw: Vec<u8> = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+    let mut header_end: Option<usize> = None;
+    let mut content_length: usize = 0;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(end) = header_end {
+            let body_received = raw.len().saturating_sub(end);
+            if body_received >= content_length {
+                break;
+            }
+        }
+        let n = match tokio::time::timeout_at(deadline, stream.read(&mut tmp)).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => break,
+        };
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&tmp[..n]);
+        if raw.len() > 2 * 1024 * 1024 {
+            break;
+        }
+        if header_end.is_none() {
+            if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                let end = pos + 4;
+                header_end = Some(end);
+                let hdr_str = String::from_utf8_lossy(&raw[..pos]);
+                for line in hdr_str.lines().skip(1) {
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.trim().eq_ignore_ascii_case("content-length") {
+                            content_length = v.trim().parse::<usize>().unwrap_or(0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let end = header_end.unwrap_or(raw.len());
+    let hdr_str = String::from_utf8_lossy(&raw[..end]);
+    let first_line = hdr_str.lines().next().unwrap_or("");
+    let mut parts = first_line.split_whitespace();
+    let method = parts.next().unwrap_or("GET").to_string();
+    let path = parts.next().unwrap_or("/").to_string();
+    let body_slice = if end < raw.len() {
+        let take = if content_length > 0 {
+            content_length.min(raw.len() - end)
+        } else {
+            raw.len() - end
+        };
+        &raw[end..end + take]
+    } else {
+        &[]
+    };
+    let body = String::from_utf8_lossy(body_slice).to_string();
+    Ok(Some((method, path, body)))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_web_conn(
     mut stream: TcpStream,
@@ -160,20 +227,12 @@ async fn handle_web_conn(
     vis_tx: Arc<Mutex<watch::Sender<Visibility>>>,
     auto_accept: Arc<AtomicBool>,
 ) -> Result<(), anyhow::Error> {
-    let mut buf = vec![0u8; 32768];
-    let n = stream.read(&mut buf).await?;
-    if n == 0 {
+    let Some((method, path, body_owned)) = read_http_request(&mut stream).await? else {
         return Ok(());
-    }
-    let req_str = String::from_utf8_lossy(&buf[..n]);
-    let first_line = req_str.lines().next().unwrap_or("");
-    let mut parts = first_line.split_whitespace();
-    let method = parts.next().unwrap_or("GET");
-    let path = parts.next().unwrap_or("/");
-    let body = req_str
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b)
-        .unwrap_or("");
+    };
+    let method = method.as_str();
+    let path = path.as_str();
+    let body = body_owned.as_str();
 
     if method == "OPTIONS" {
         let hdr = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n";
@@ -318,10 +377,26 @@ async fn handle_web_conn(
             write_response(&mut stream, 200, "application/json", br#"{"ok":true}"#).await?;
         }
         ("POST", "/api/send") => {
-            if let Ok(req) = serde_json::from_str::<SendRequest>(body) {
-                let expanded = expand_file_paths(&req.files);
-                if !expanded.is_empty() {
-                    if req.protocol.as_deref() == Some("airdrop") || req.id.starts_with("airdrop://")
+            match serde_json::from_str::<SendRequest>(body) {
+                Ok(req) => {
+                    let expanded = expand_file_paths(&req.files);
+                    info!(
+                        "POST /api/send: id={} name={} protocol={:?} files={}",
+                        req.id,
+                        req.name,
+                        req.protocol,
+                        expanded.len()
+                    );
+                    if expanded.is_empty() {
+                        warn!("POST /api/send: no readable files from {:?}", req.files);
+                        write_response(
+                            &mut stream,
+                            400,
+                            "application/json",
+                            br#"{"ok":false,"error":"No readable files selected"}"#,
+                        )
+                        .await?;
+                    } else if req.protocol.as_deref() == Some("airdrop") || req.id.starts_with("airdrop://")
                     {
                         let paths: Vec<PathBuf> = expanded.iter().map(PathBuf::from).collect();
                         let ad = airdrop.clone();
@@ -332,6 +407,7 @@ async fn handle_web_conn(
                                 warn!("AirDrop send failed: {e}");
                             }
                         });
+                        write_response(&mut stream, 200, "application/json", br#"{"ok":true}"#).await?;
                     } else {
                         let _ = send_tx
                             .send(SendInfo {
@@ -342,10 +418,20 @@ async fn handle_web_conn(
                                 ble: req.ble,
                             })
                             .await;
+                        write_response(&mut stream, 200, "application/json", br#"{"ok":true}"#).await?;
                     }
                 }
+                Err(e) => {
+                    warn!("POST /api/send invalid JSON ({e}): {body}");
+                    write_response(
+                        &mut stream,
+                        400,
+                        "application/json",
+                        br#"{"ok":false,"error":"Invalid send request"}"#,
+                    )
+                    .await?;
+                }
             }
-            write_response(&mut stream, 200, "application/json", br#"{"ok":true}"#).await?;
         }
         ("POST", "/api/pick-files") => {
             let paths = pick_files_dialog().await;

@@ -104,10 +104,10 @@ function deviceVisual(ep: EndpointInfo): {
   tintBg: string;
   tintFg: string;
 } {
-  if (ep.id.startsWith('airdrop://')) {
+  if (ep.id.startsWith('airdrop://') || ep.protocol === 'airdrop') {
     return {
-      shape: 'clover4',
-      icon: 'devices',
+      shape: 'softBurst',
+      icon: 'apple',
       tintBg: 'var(--md-sys-color-tertiary-container)',
       tintFg: 'var(--md-sys-color-on-tertiary-container)',
     };
@@ -580,7 +580,10 @@ export default function App() {
   );
 
   const pendingIncoming = useMemo(
-    () => transferList.filter((t) => t.state === 'WaitingForUserConsent'),
+    () =>
+      transferList.filter(
+        (t) => t.kind === 'Inbound' && t.state === 'WaitingForUserConsent'
+      ),
     [transferList]
   );
 
