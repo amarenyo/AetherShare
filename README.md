@@ -25,10 +25,11 @@
 - **Smart Network Interface Filtering (`aethershare-core::net_filter`):**
   - Automatically excludes virtual/container/VPN interfaces (`vmnet*`, `docker*`, `virbr*`, `veth*`, `tun*`, `tailscale*`, `wg*`) from mDNS and bandwidth upgrades.
   - Normalizes mDNS hostnames to valid `<hostname>.local.` names and handles IP changes / suspend-resume automatically.
-- **Built-in Apple AirDrop Engine (`aethershare-airdrop`):**
-  - Apple Continuity BLE AirDrop Beacon (`0x004C`, type `0x05`).
-  - `_airdrop._tcp.local.` DNS-SD advertisement & discovery.
-  - HTTPS/TLS + HTTP/1.1 Server & Client for `/Discover`, `/Ask`, and `/Upload` (Binary/XML Plist + pure-Rust POSIX.1 `070707` ODC CPIO + Gzip).
+- **Built-in Apple AirDrop Engine (`aethershare-airdrop` + embedded `aethershare-awdld`, powered by [`t4t5/owly`](https://github.com/t4t5/owly)):**
+  - Real Apple Wireless Direct Link (**AWDL**, `awdl0`, IPv6 link-local `fe80::/64`) bundled directly inside AetherShare's `.rpm`, `.deb`, and Arch `.pkg.tar.zst` packages (D-Bus auto-activated, hardened systemd service with `CAP_NET_ADMIN`/`CAP_NET_RAW`, polkit, NetworkManager & firewall rules).
+  - Apple Continuity BLE wake-up advertisement (`0x004C`) via BlueZ, burst mDNS responder, AWDL peer `/Discover` probing, TLS `/Ask` & `/Upload`, and sandboxed extraction.
+  - **Automatic mode detection:** runs seamlessly alongside Wi-Fi on Shared-mode Wi-Fi cards (e.g. MediaTek MT7925, Realtek RTL8852) and offers a one-click **AirDrop Mode** toggle on Exclusive-mode cards (e.g. Intel AX200/AX201/AX210, pausing Wi-Fi while active and automatically reconnecting when turned off).
+  - *Note:* Set your Apple device's AirDrop visibility to **"Everyone for 10 minutes"**. Portable `.AppImage` builds do not install the system AWDL daemon; use `.rpm`, `.deb`, or `.pkg.tar.zst` for all-in-one AirDrop support.
 - **CLI & Headless Daemon (`aethershare-cli`):**
   - `aethershare doctor` — System, interface, Bluetooth & mDNS diagnostics
   - `aethershare ui` — Launches the local daemon + embedded web UI (`http://127.0.0.1:8787`)

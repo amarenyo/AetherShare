@@ -1,4 +1,4 @@
-import type { EndpointInfo, PickedFile, StatusResponse, VisibilityMode } from '../types';
+import type { AirDropRadioStatus, EndpointInfo, PickedFile, StatusResponse, VisibilityMode } from '../types';
 
 declare global {
   interface Window {
@@ -113,6 +113,15 @@ export async function updateSettings(patch: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
   });
+}
+
+export async function setAirDropEnabled(
+  enabled: boolean
+): Promise<{ ok: boolean; error?: string; airdrop?: AirDropRadioStatus }> {
+  const res = await fetch(`${apiBase()}/api/airdrop/${enabled ? 'enable' : 'disable'}`, {
+    method: 'POST',
+  });
+  return res.json();
 }
 
 export function formatBytes(bytes: number): string {

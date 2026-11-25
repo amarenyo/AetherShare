@@ -8,6 +8,7 @@ import {
   pickFolderNative,
   sendFilesToDevice,
   sendTransferAction,
+  setAirDropEnabled,
   setVisibility,
   startDiscovery,
   stopDiscovery,
@@ -196,6 +197,7 @@ export default function App() {
     releaseUrl?: string;
   }>({ state: 'idle' });
   const [scanning, setScanning] = useState(false);
+  const [airdropBusy, setAirdropBusy] = useState(false);
   const [devices, setDevices] = useState<Record<string, EndpointInfo>>({});
   const [queuedFiles, setQueuedFiles] = useState<PickedFile[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -875,27 +877,89 @@ export default function App() {
                   <div className="nearby-header">
                     <span className="m3-title-large">{tr.nearbyDevices}</span>
 
-                    <div className="radar-reload-wrap">
-                      {scanning && (
-                        <>
-                          <span className="radar-ring" />
-                          <span className="radar-ring delay" />
-                        </>
-                      )}
-                      <md-filled-tonal-icon-button
-                        title={tr.reloadDevicesTitle}
-                        aria-label={tr.reloadDevicesTitle}
-                        style={{ position: 'relative', zIndex: 2 }}
-                        onClick={() => triggerScanBurst(8000, true)}
-                      >
-                        {scanning ? (
-                          <ContainedLoadingIndicator size={40} bare />
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      {status?.airdrop?.available && status.airdrop.mode === 'exclusive' && (
+                        status.airdrop.active ? (
+                          <md-filled-tonal-button
+                            disabled={airdropBusy || undefined}
+                            onClick={async () => {
+                              setAirdropBusy(true);
+                              try {
+                                const res = await setAirDropEnabled(false);
+                                if (res.airdrop) {
+                                  setStatus((prev) => (prev ? { ...prev, airdrop: res.airdrop } : prev));
+                                }
+                              } catch {
+                                showSnack(tr.airdropToggleFailed);
+                              } finally {
+                                setAirdropBusy(false);
+                              }
+                            }}
+                          >
+                            <span slot="icon"><Icon name="bolt" size={17} /></span>
+                            {tr.airdropModeActiveBtn}
+                          </md-filled-tonal-button>
                         ) : (
-                          <Icon name="refresh" size={22} />
+                          <md-outlined-button
+                            disabled={airdropBusy || undefined}
+                            onClick={async () => {
+                              setAirdropBusy(true);
+                              try {
+                                const res = await setAirDropEnabled(true);
+                                if (res.airdrop) {
+                                  setStatus((prev) => (prev ? { ...prev, airdrop: res.airdrop } : prev));
+                                }
+                                if (!res.ok) {
+                                  showSnack(res.error || tr.airdropToggleFailed);
+                                }
+                              } catch {
+                                showSnack(tr.airdropToggleFailed);
+                              } finally {
+                                setAirdropBusy(false);
+                              }
+                            }}
+                          >
+                            <span slot="icon"><Icon name="bolt" size={17} /></span>
+                            {tr.airdropModeBtn}
+                          </md-outlined-button>
+                        )
+                      )}
+
+                      <div className="radar-reload-wrap">
+                        {scanning && (
+                          <>
+                            <span className="radar-ring" />
+                            <span className="radar-ring delay" />
+                          </>
                         )}
-                      </md-filled-tonal-icon-button>
+                        <md-filled-tonal-icon-button
+                          title={tr.reloadDevicesTitle}
+                          aria-label={tr.reloadDevicesTitle}
+                          style={{ position: 'relative', zIndex: 2 }}
+                          onClick={() => triggerScanBurst(8000, true)}
+                        >
+                          {scanning ? (
+                            <ContainedLoadingIndicator size={40} bare />
+                          ) : (
+                            <Icon name="refresh" size={22} />
+                          )}
+                        </md-filled-tonal-icon-button>
+                      </div>
                     </div>
                   </div>
+
+                  {status?.airdrop?.active && status.airdrop.mode === 'exclusive' && (
+                    <div
+                      className="m3-body-medium"
+                      style={{
+                        color: 'var(--md-sys-color-on-surface-variant)',
+                        marginTop: 8,
+                        marginBottom: 4,
+                      }}
+                    >
+                      {tr.airdropExclusiveActiveHint}
+                    </div>
+                  )}
 
                   {unifiedDevices.length === 0 ? (
                     <div className="nearby-empty">
@@ -1301,7 +1365,15 @@ export default function App() {
                     </div>
                     <div className="diag-row">
                       <span className="m3-label-large">{tr.devAdPort}</span>
-                      <span className="m3-mono">{status?.airdrop_port ?? 8770}</span>
+                      <span className="m3-mono">{status?.airdrop_port ?? 8771}</span>
+                    </div>
+                    <div className="diag-row">
+                      <span className="m3-label-large">{tr.devAirDropRadio}</span>
+                      <span className="m3-mono">
+                        {status?.airdrop
+                          ? `${status.airdrop.mode}${status.airdrop.active ? ' (active)' : ''}${status.airdrop.driver ? ` · ${status.airdrop.driver}` : ''}${status.airdrop.reason ? ` — ${status.airdrop.reason}` : ''}`
+                          : '—'}
+                      </span>
                     </div>
                     <div className="diag-row">
                       <span className="m3-label-large">{tr.devActiveIps}</span>

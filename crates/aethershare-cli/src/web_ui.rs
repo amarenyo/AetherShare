@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use aethershare_airdrop::{AirDropClient, AirDropMdnsDiscovery};
+use aethershare_airdrop::{AirDropManager, AirDropRadioStatus};
 use aethershare_core::channel::{ChannelMessage, Message, TransferAction};
 use aethershare_core::net_filter::{diagnose_interfaces, filtered_ipv4_addrs};
 use aethershare_core::{EndpointInfo, OutboundPayload, RQS, SendInfo, Visibility};
-use log::{debug, info};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -33,6 +33,7 @@ struct StatusResponse {
     system_color_scheme: Option<String>,
     system_lang: String,
     version: String,
+    airdrop: AirDropRadioStatus,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +99,7 @@ pub async fn serve_web_ui(
     device_name: String,
     airdrop_port: u16,
     rqs: Arc<Mutex<RQS>>,
+    airdrop: AirDropManager,
     msg_tx: broadcast::Sender<ChannelMessage>,
     disc_tx: broadcast::Sender<EndpointInfo>,
     send_tx: mpsc::Sender<SendInfo>,
@@ -106,7 +108,6 @@ pub async fn serve_web_ui(
     ctk: CancellationToken,
 ) -> Result<(), anyhow::Error> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-    let ad_disc_ctk: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
 
     loop {
         tokio::select! {
@@ -115,12 +116,12 @@ pub async fn serve_web_ui(
                 let Ok((stream, _)) = accepted else { continue; };
                 let device_name = device_name.clone();
                 let rqs = rqs.clone();
+                let airdrop = airdrop.clone();
                 let msg_tx = msg_tx.clone();
                 let disc_tx = disc_tx.clone();
                 let send_tx = send_tx.clone();
                 let vis_tx = vis_tx.clone();
                 let auto_accept = auto_accept.clone();
-                let ad_disc_ctk = ad_disc_ctk.clone();
 
                 tokio::spawn(async move {
                     if let Err(e) = handle_web_conn(
@@ -128,12 +129,12 @@ pub async fn serve_web_ui(
                         device_name,
                         airdrop_port,
                         rqs,
+                        airdrop,
                         msg_tx,
                         disc_tx,
                         send_tx,
                         vis_tx,
                         auto_accept,
-                        ad_disc_ctk,
                     )
                     .await
                     {
@@ -152,12 +153,12 @@ async fn handle_web_conn(
     device_name: String,
     airdrop_port: u16,
     rqs: Arc<Mutex<RQS>>,
+    airdrop: AirDropManager,
     msg_tx: broadcast::Sender<ChannelMessage>,
     disc_tx: broadcast::Sender<EndpointInfo>,
     send_tx: mpsc::Sender<SendInfo>,
     vis_tx: Arc<Mutex<watch::Sender<Visibility>>>,
     auto_accept: Arc<AtomicBool>,
-    ad_disc_ctk: Arc<Mutex<Option<CancellationToken>>>,
 ) -> Result<(), anyhow::Error> {
     let mut buf = vec![0u8; 32768];
     let n = stream.read(&mut buf).await?;
@@ -196,6 +197,7 @@ async fn handle_web_conn(
                 (v, guard.port_number, dl, guard.get_device_name())
             };
             let (system_accent, system_color_scheme) = read_system_theme().await;
+            let ad_status = airdrop.status().await;
             let status = StatusResponse {
                 device_name: if live_name.is_empty() {
                     device_name
@@ -216,6 +218,7 @@ async fn handle_web_conn(
                 system_color_scheme,
                 system_lang: aethershare_core::i18n::detect_system_lang().code().to_string(),
                 version: aethershare_core::APP_VERSION.to_string(),
+                airdrop: ad_status,
             };
             let json = serde_json::to_vec(&status)?;
             write_response(&mut stream, 200, "application/json", &json).await?;
@@ -257,24 +260,37 @@ async fn handle_web_conn(
                 let mut guard = rqs.lock().unwrap();
                 let _ = guard.discovery(disc_tx.clone());
             }
-            if let Ok(ad_disc) = AirDropMdnsDiscovery::new(disc_tx) {
-                let c = CancellationToken::new();
-                if let Some(old) = ad_disc_ctk.lock().unwrap().replace(c.clone()) {
-                    old.cancel();
-                }
-                tokio::spawn(async move {
-                    let _ = ad_disc.run(c).await;
-                });
-            }
+            let _ = airdrop.start_discovery().await;
             write_response(&mut stream, 200, "application/json", br#"{"ok":true}"#).await?;
         }
         ("POST", "/api/discovery/stop") => {
             info!("UI: stop_discovery");
             rqs.lock().unwrap().stop_discovery();
-            if let Some(old) = ad_disc_ctk.lock().unwrap().take() {
-                old.cancel();
-            }
+            airdrop.stop_discovery().await;
             write_response(&mut stream, 200, "application/json", br#"{"ok":true}"#).await?;
+        }
+        ("POST", "/api/airdrop/enable") => {
+            match airdrop.enable().await {
+                Ok(st) => {
+                    let body = serde_json::to_vec(&serde_json::json!({ "ok": true, "airdrop": st }))?;
+                    write_response(&mut stream, 200, "application/json", &body).await?;
+                }
+                Err(e) => {
+                    warn!("POST /api/airdrop/enable failed: {e}");
+                    let st = airdrop.probe().await;
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "ok": false,
+                        "error": e.to_string(),
+                        "airdrop": st
+                    }))?;
+                    write_response(&mut stream, 200, "application/json", &body).await?;
+                }
+            }
+        }
+        ("POST", "/api/airdrop/disable") => {
+            let st = airdrop.disable().await.unwrap_or_else(|_| AirDropRadioStatus::default());
+            let body = serde_json::to_vec(&serde_json::json!({ "ok": true, "airdrop": st }))?;
+            write_response(&mut stream, 200, "application/json", &body).await?;
         }
         ("POST", "/api/visibility") => {
             if let Ok(req) = serde_json::from_str::<VisibilityRequest>(body) {
@@ -307,16 +323,14 @@ async fn handle_web_conn(
                 if !expanded.is_empty() {
                     if req.protocol.as_deref() == Some("airdrop") || req.id.starts_with("airdrop://")
                     {
-                        let addr = req
-                            .id
-                            .strip_prefix("airdrop://")
-                            .unwrap_or(&req.addr)
-                            .to_string();
                         let paths: Vec<PathBuf> = expanded.iter().map(PathBuf::from).collect();
-                        let sender_name = device_name.clone();
+                        let ad = airdrop.clone();
+                        let id = req.id.clone();
+                        let peer_name = req.name.clone();
                         tokio::spawn(async move {
-                            let client = AirDropClient::new(sender_name, true);
-                            let _ = client.send_files(&addr, &paths).await;
+                            if let Err(e) = ad.send_files(id, peer_name, paths).await {
+                                warn!("AirDrop send failed: {e}");
+                            }
                         });
                     } else {
                         let _ = send_tx

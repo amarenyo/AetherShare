@@ -8,6 +8,16 @@ export interface InterfaceDiagnostic {
   reason: string;
 }
 
+export interface AirDropRadioStatus {
+  available: boolean;
+  active: boolean;
+  mode: string; // 'shared' | 'exclusive' | 'unsupported' | 'unavailable'
+  driver?: string | null;
+  device?: string | null;
+  channel?: number | null;
+  reason?: string | null;
+}
+
 export interface StatusResponse {
   device_name: string;
   visibility: VisibilityMode;
@@ -22,6 +32,7 @@ export interface StatusResponse {
   system_color_scheme?: 'dark' | 'light' | null;
   system_lang?: 'de' | 'en' | null;
   version?: string;
+  airdrop?: AirDropRadioStatus;
 }
 
 export interface EndpointInfo {

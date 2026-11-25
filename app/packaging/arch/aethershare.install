@@ -1,0 +1,29 @@
+post_install() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  if command -v nmcli >/dev/null 2>&1; then
+    nmcli general reload conf >/dev/null 2>&1 || true
+  fi
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+  fi
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --permanent --zone=trusted --add-interface=awdl0 >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+}
+
+post_upgrade() {
+  post_install
+}
+
+post_remove() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop aethershare-awdld.service >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+  if command -v nmcli >/dev/null 2>&1; then
+    nmcli general reload conf >/dev/null 2>&1 || true
+  fi
+}

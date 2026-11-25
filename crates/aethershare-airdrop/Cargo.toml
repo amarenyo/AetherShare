@@ -11,16 +11,23 @@ anyhow = "1.0"
 base64 = "0.23"
 bytes = "1.10"
 flate2 = "1.1"
+getrandom = "0.3"
 hex = "0.4"
 log = "0.4"
 mdns-sd = { git = "https://github.com/Martichou/mdns-sd", branch = "unsolicited" }
 mime_guess = "2.0"
+owly-airdrop = { git = "https://github.com/t4t5/owly", tag = "v0.4.3", features = ["tokio", "mdns"] }
+owly-awdl = { git = "https://github.com/t4t5/owly", tag = "v0.4.3" }
+owly-radio = { git = "https://github.com/t4t5/owly", tag = "v0.4.3" }
+owlyd = { git = "https://github.com/t4t5/owly", tag = "v0.4.3" }
 plist = "1.7"
 rand = "0.10"
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 sha2 = "0.11"
 tokio = { version = "1.43", features = ["full"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }

@@ -32,6 +32,11 @@ export interface Translations {
   noDevicesFound: string;
   clickToSend: string;
   readyToReceive: string;
+  airdropModeBtn: string;
+  airdropModeActiveBtn: string;
+  airdropExclusiveActiveHint: string;
+  airdropToggleFailed: string;
+  devAirDropRadio: string;
 
   // Incoming transfer sheet
   wantsToSend: (peer: string) => string;
@@ -141,6 +146,12 @@ const DE: Translations = {
   noDevicesFound: 'Keine erreichbaren Geräte gefunden.',
   clickToSend: 'Klicken zum Senden',
   readyToReceive: 'Bereit zum Empfangen',
+  airdropModeBtn: 'AirDrop',
+  airdropModeActiveBtn: 'AirDrop aktiv',
+  airdropExclusiveActiveHint:
+    'AirDrop-Modus aktiv (WLAN ist kurz pausiert und verbindet sich beim Ausschalten automatisch neu).',
+  airdropToggleFailed: 'AirDrop-Modus konnte nicht umgeschaltet werden',
+  devAirDropRadio: 'AirDrop AWDL-Radio',
 
   wantsToSend: (peer) => `${peer} möchte senden`,
   filesFallback: 'Dateien',
@@ -245,6 +256,12 @@ const EN: Translations = {
   noDevicesFound: 'No reachable devices found.',
   clickToSend: 'Click to send',
   readyToReceive: 'Ready to receive',
+  airdropModeBtn: 'AirDrop',
+  airdropModeActiveBtn: 'AirDrop active',
+  airdropExclusiveActiveHint:
+    'AirDrop mode active (Wi-Fi is paused and reconnects automatically when turned off).',
+  airdropToggleFailed: 'Could not toggle AirDrop mode',
+  devAirDropRadio: 'AirDrop AWDL radio',
 
   wantsToSend: (peer) => `${peer} wants to share`,
   filesFallback: 'Files',

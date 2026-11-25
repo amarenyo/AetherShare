@@ -8,12 +8,14 @@
 //! - Pure-Rust POSIX.1 ODC (`070707`) CPIO + Gzip archive packing and safe extraction
 
 pub mod archive;
+pub mod awdl;
 pub mod ble;
 pub mod client;
 pub mod mdns;
 pub mod plist_codec;
 pub mod server;
 
+pub use awdl::{AirDropManager, AirDropRadioStatus};
 pub use client::AirDropClient;
 pub use mdns::{AirDropMdnsDiscovery, AirDropMdnsServer};
 pub use server::AirDropServer;

@@ -1,11 +1,12 @@
 # Maintainer: amarenyo <https://github.com/amarenyo/AetherShare>
 pkgname=aethershare
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
-pkgdesc="Open-Source Android Quick Share & Apple AirDrop Desktop App + CLI for Linux"
+pkgdesc="Open-Source Android Quick Share & Apple AirDrop (AWDL) Desktop App + CLI for Linux"
 arch=('x86_64')
 url="https://github.com/amarenyo/AetherShare"
 license=('GPL-3.0-or-later')
+install=aethershare.install
 depends=(
   'webkit2gtk-4.1'
   'gtk3'
@@ -15,6 +16,7 @@ depends=(
   'bluez'
   'networkmanager'
   'dbus'
+  'polkit'
 )
 optdepends=(
   'libnotify: desktop notifications on non-KDE desktop environments'
@@ -40,9 +42,9 @@ build() {
   npm ci --no-audit --no-fund
   npm run build
 
-  # 2. Build CLI binary
+  # 2. Build CLI + embedded AWDL radio daemon
   cd "$srcdir/AetherShare-$pkgver"
-  cargo build --release --locked -p aethershare-cli
+  cargo build --release --locked -p aethershare-cli -p aethershare-awdld
 
   # 3. Build native Tauri v2 desktop binary
   cd "$srcdir/AetherShare-$pkgver/app/src-tauri"
@@ -56,14 +58,32 @@ package() {
     "$pkgdir/usr/bin/aethershare-desktop"
   install -Dm755 "target/release/aethershare" \
     "$pkgdir/usr/bin/aethershare"
+  install -Dm755 "target/release/aethershare-awdld" \
+    "$pkgdir/usr/libexec/aethershare/aethershare-awdld"
+
+  # Embedded AWDL radio service configs (D-Bus auto-activated, polkit, NetworkManager, networkd)
+  install -Dm644 "app/packaging/awdl/aethershare-awdld.service" \
+    "$pkgdir/usr/lib/systemd/system/aethershare-awdld.service"
+  install -Dm644 "app/packaging/awdl/aethershare-awdld.conf" \
+    "$pkgdir/usr/share/dbus-1/system.d/aethershare-awdld.conf"
+  install -Dm644 "app/packaging/awdl/io.github.t4t5.Owly.service" \
+    "$pkgdir/usr/share/dbus-1/system-services/io.github.t4t5.Owly.service"
+  install -Dm644 "app/packaging/awdl/aethershare-awdld.policy" \
+    "$pkgdir/usr/share/polkit-1/actions/aethershare-awdld.policy"
+  install -Dm644 "app/packaging/awdl/90-aethershare-awdl.conf" \
+    "$pkgdir/usr/lib/NetworkManager/conf.d/90-aethershare-awdl.conf"
+  install -Dm644 "app/packaging/awdl/10-aethershare-awdl0.link" \
+    "$pkgdir/usr/lib/systemd/network/10-aethershare-awdl0.link"
 
   # Desktop entry matching GTK app_id so KDE/Wayland resolves the app icon
   install -Dm644 "app/packaging/org.aethershare.desktop.desktop" \
     "$pkgdir/usr/share/applications/aethershare-desktop.desktop"
 
-  # Application icons
+  # Application icons & third-party licenses
   install -Dm644 "app/src-tauri/icons/icon.svg" \
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/aethershare.svg"
   install -Dm644 "app/src-tauri/icons/icon.png" \
     "$pkgdir/usr/share/icons/hicolor/256x256/apps/aethershare.png"
+  install -Dm644 "THIRD_PARTY_LICENSES.md" \
+    "$pkgdir/usr/share/licenses/$pkgname/THIRD_PARTY_LICENSES.md"
 }

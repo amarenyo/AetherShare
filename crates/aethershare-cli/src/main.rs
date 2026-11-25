@@ -4,9 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aethershare_airdrop::{
-    AirDropClient, AirDropMdnsDiscovery, AirDropMdnsServer, AirDropServer,
-};
+use aethershare_airdrop::{AirDropClient, AirDropManager, AirDropMdnsDiscovery};
 use aethershare_core::channel::{Message, TransferKind};
 use aethershare_core::net_filter::{
     diagnose_interfaces, filtered_ipv4_addrs, normalize_mdns_hostname, primary_lan_ipv4,
@@ -201,31 +199,6 @@ async fn run_daemon(args: &[String], open_browser: bool) -> Result<(), anyhow::E
 
     let ctk = CancellationToken::new();
 
-    // Start AirDrop Server + AirDrop mDNS announcement
-    let ad_server =
-        AirDropServer::bind(airdrop_port, device_name.clone(), msg_tx.clone(), auto_accept)
-            .await?;
-    let actual_ad_port = ad_server.local_port()?;
-    let ad_ctk = ctk.clone();
-    tokio::spawn(async move {
-        if let Err(e) = ad_server.run(ad_ctk).await {
-            error!("AirDropServer error: {e}");
-        }
-    });
-
-    if let Ok(ad_mdns) = AirDropMdnsServer::new(
-        format!("aethershare-{:04x}", rand::random::<u16>()),
-        device_name.clone(),
-        actual_ad_port,
-    ) {
-        let ad_mdns_ctk = ctk.clone();
-        tokio::spawn(async move {
-            if let Err(e) = ad_mdns.run(ad_mdns_ctk).await {
-                warn!("AirDropMdnsServer ended: {e}");
-            }
-        });
-    }
-
     // Interactive desktop notifications ([Accept]/[Decline], native KDE JobViewV2 progress bar, [Open])
     let auto_accept_flag = Arc::new(AtomicBool::new(auto_accept));
     aethershare_core::notifications::spawn_transfer_notifications(
@@ -235,13 +208,37 @@ async fn run_daemon(args: &[String], open_browser: bool) -> Result<(), anyhow::E
 
     // Shared discovery channel for Web UI
     let (disc_tx, _) = broadcast::channel::<EndpointInfo>(64);
+
+    // Embedded AWDL AirDrop manager (powered by owly-airdrop + aethershare-awdld)
+    let airdrop = AirDropManager::new(
+        device_name.clone(),
+        auto_accept_flag.clone(),
+        msg_tx.clone(),
+        disc_tx.clone(),
+    );
+    let ad_startup = airdrop.clone();
+    tokio::spawn(async move {
+        let st = ad_startup.probe().await;
+        info!(
+            "AirDrop AWDL probe: available={}, mode={}, driver={:?}",
+            st.available, st.mode, st.driver
+        );
+        if st.available && st.mode == "shared" {
+            if let Err(e) = ad_startup.enable().await {
+                warn!("AirDrop auto-enable in shared mode failed: {e}");
+            }
+        }
+    });
+
+    let actual_ad_port = airdrop_port;
     let rqs_shared = Arc::new(Mutex::new(rqs));
 
     let web_url = format!("http://127.0.0.1:{web_port}");
-    info!("AetherShare Web-UI & API läuft auf: {web_url}");
+    info!("AetherShare Web UI & API listening on: {web_url}");
 
     let web_ctk = ctk.clone();
     let rqs_for_web = rqs_shared.clone();
+    let ad_for_web = airdrop.clone();
     let auto_accept_for_web = auto_accept_flag.clone();
     tokio::spawn(async move {
         if let Err(e) = web_ui::serve_web_ui(
@@ -249,6 +246,7 @@ async fn run_daemon(args: &[String], open_browser: bool) -> Result<(), anyhow::E
             device_name,
             actual_ad_port,
             rqs_for_web,
+            ad_for_web,
             msg_tx,
             disc_tx,
             send_tx,
@@ -270,7 +268,8 @@ async fn run_daemon(args: &[String], open_browser: bool) -> Result<(), anyhow::E
     }
 
     tokio::signal::ctrl_c().await?;
-    info!("Beende AetherShare Daemon...");
+    info!("Stopping AetherShare daemon...");
+    let _ = airdrop.disable().await;
     ctk.cancel();
     rqs_shared.lock().unwrap().stop().await;
     Ok(())

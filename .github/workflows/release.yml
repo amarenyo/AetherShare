@@ -121,6 +121,9 @@ jobs:
       - name: Run Rust workspace tests
         run: cargo test --workspace --locked
 
+      - name: Build CLI & embedded AWDL radio daemon (release)
+        run: cargo build --release --locked -p aethershare-cli -p aethershare-awdld
+
       - name: Build AppImage, DEB & RPM bundles via Tauri CLI
         working-directory: app
         env:
@@ -169,6 +172,7 @@ jobs:
             libayatana-appindicator \
             bluez \
             networkmanager \
+            polkit \
             git \
             tar \
             gzip
@@ -193,6 +197,7 @@ jobs:
           rm -rf "AetherShare-${RELEASE_VERSION}"
 
           cp app/packaging/arch/PKGBUILD /tmp/arch-build/PKGBUILD
+          cp app/packaging/arch/aethershare.install /tmp/arch-build/aethershare.install
           sed -i "s/^pkgver=.*/pkgver=${RELEASE_VERSION}/" /tmp/arch-build/PKGBUILD
           chown -R builder:builder /tmp/arch-build
 

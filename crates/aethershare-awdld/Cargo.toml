@@ -1,0 +1,18 @@
+[package]
+name = "aethershare-awdld"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+repository.workspace = true
+description = "Embedded AWDL radio service for AetherShare (powered by t4t5/owly)"
+
+[[bin]]
+name = "aethershare-awdld"
+path = "src/main.rs"
+
+[dependencies]
+owly-radio = { git = "https://github.com/t4t5/owly", tag = "v0.4.3" }
+owlyd = { git = "https://github.com/t4t5/owly", tag = "v0.4.3" }
+tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

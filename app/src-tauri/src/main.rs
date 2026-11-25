@@ -10,9 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use aethershare_airdrop::{
-    AirDropClient, AirDropMdnsDiscovery, AirDropMdnsServer, AirDropServer,
-};
+use aethershare_airdrop::{AirDropManager, AirDropRadioStatus};
 use aethershare_core::channel::{ChannelMessage, Message, TransferAction};
 use aethershare_core::net_filter::{diagnose_interfaces, filtered_ipv4_addrs};
 use aethershare_core::{EndpointInfo, OutboundPayload, RQS, SendInfo, Visibility};
@@ -27,10 +25,12 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 const BRIDGE_PORT: u16 = 8787;
-const AIRDROP_PORT: u16 = 8770;
+const AIRDROP_PORT: u16 = aethershare_airdrop::awdl::LOCAL_AIRDROP_PORT;
 
 struct EngineHandle {
     rqs: Arc<Mutex<RQS>>,
+    airdrop: AirDropManager,
+    rt: Arc<tokio::runtime::Runtime>,
     ctk: CancellationToken,
 }
 
@@ -62,37 +62,12 @@ fn main() {
     let ctk = CancellationToken::new();
     let auto_accept = Arc::new(AtomicBool::new(false));
 
-    // Start the full AetherShare Quick Share + AirDrop + Local Bridge Engine
-    let rqs_shared: Arc<Mutex<RQS>> = rt.block_on(async {
+    // Start the full AetherShare Quick Share + AWDL AirDrop + Local Bridge Engine
+    let (rqs_shared, airdrop_mgr): (Arc<Mutex<RQS>>, AirDropManager) = rt.block_on(async {
         let mut rqs = RQS::new(Visibility::Visible, None, None, Some(device_name.clone()));
         let (send_tx, _ble_rx) = rqs.run().await.expect("Failed to start AetherShare core");
         let msg_tx = rqs.message_sender.clone();
         let vis_tx = rqs.visibility_sender.clone();
-
-        // AirDrop server + mDNS
-        if let Ok(ad_server) =
-            AirDropServer::bind(AIRDROP_PORT, device_name.clone(), msg_tx.clone(), false).await
-        {
-            let actual_ad_port = ad_server.local_port().unwrap_or(AIRDROP_PORT);
-            let ad_ctk = ctk.clone();
-            tokio::spawn(async move {
-                if let Err(e) = ad_server.run(ad_ctk).await {
-                    error!("AirDropServer error: {e}");
-                }
-            });
-            if let Ok(ad_mdns) = AirDropMdnsServer::new(
-                format!("aethershare-{:04x}", rand::random::<u16>()),
-                device_name.clone(),
-                actual_ad_port,
-            ) {
-                let mdns_ctk = ctk.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = ad_mdns.run(mdns_ctk).await {
-                        warn!("AirDropMdnsServer ended: {e}");
-                    }
-                });
-            }
-        }
 
         // Interactive desktop notifications ([Accept]/[Decline], native KDE JobViewV2 progress bar, [Open])
         aethershare_core::notifications::spawn_transfer_notifications(
@@ -101,8 +76,33 @@ fn main() {
         );
 
         let (disc_tx, _) = broadcast::channel::<EndpointInfo>(64);
+        let airdrop = AirDropManager::new(
+            device_name.clone(),
+            auto_accept.clone(),
+            msg_tx.clone(),
+            disc_tx.clone(),
+        );
+
+        // Probe AWDL radio daemon (`aethershare-awdld` / `owlyd`).
+        // In Shared mode (Wi-Fi stays connected), auto-enable AirDrop seamlessly.
+        // In Exclusive mode (e.g. Intel AX201), wait for the user to toggle AirDrop Mode.
+        let ad_startup = airdrop.clone();
+        tokio::spawn(async move {
+            let st = ad_startup.probe().await;
+            info!(
+                "AirDrop AWDL probe: available={}, mode={}, driver={:?}, device={:?}",
+                st.available, st.mode, st.driver, st.device
+            );
+            if st.available && st.mode == "shared" {
+                if let Err(e) = ad_startup.enable().await {
+                    warn!("AirDrop auto-enable in shared mode failed: {e}");
+                }
+            }
+        });
+
         let rqs_arc = Arc::new(Mutex::new(rqs));
         let rqs_bridge = rqs_arc.clone();
+        let ad_bridge = airdrop.clone();
         let bridge_ctk = ctk.clone();
         let bridge_name = device_name.clone();
         let aa_bridge = auto_accept.clone();
@@ -113,6 +113,7 @@ fn main() {
                 bridge_name,
                 AIRDROP_PORT,
                 rqs_bridge,
+                ad_bridge,
                 msg_tx,
                 disc_tx,
                 send_tx,
@@ -126,11 +127,13 @@ fn main() {
             }
         });
 
-        rqs_arc
+        (rqs_arc, airdrop)
     });
 
     let engine = EngineHandle {
         rqs: rqs_shared,
+        airdrop: airdrop_mgr,
+        rt: rt.clone(),
         ctk,
     };
 
@@ -166,6 +169,8 @@ fn main() {
                     }
                     "quit" => {
                         let eng = app.state::<EngineHandle>();
+                        let ad = eng.airdrop.clone();
+                        let _ = eng.rt.block_on(ad.disable());
                         eng.ctk.cancel();
                         app.exit(0);
                     }
@@ -234,6 +239,7 @@ struct StatusResponse {
     system_color_scheme: Option<String>,
     system_lang: String,
     version: String,
+    airdrop: AirDropRadioStatus,
 }
 
 #[derive(Deserialize)]
@@ -293,6 +299,7 @@ async fn serve_bridge(
     device_name: String,
     airdrop_port: u16,
     rqs: Arc<Mutex<RQS>>,
+    airdrop: AirDropManager,
     msg_tx: broadcast::Sender<ChannelMessage>,
     disc_tx: broadcast::Sender<EndpointInfo>,
     send_tx: mpsc::Sender<SendInfo>,
@@ -301,7 +308,6 @@ async fn serve_bridge(
     ctk: CancellationToken,
 ) -> Result<(), anyhow::Error> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-    let ad_disc_ctk: Arc<Mutex<Option<CancellationToken>>> = Arc::new(Mutex::new(None));
     info!("AetherShare Desktop Bridge listening on http://127.0.0.1:{port}");
 
     loop {
@@ -311,12 +317,12 @@ async fn serve_bridge(
                 let Ok((stream, _)) = accepted else { continue; };
                 let device_name = device_name.clone();
                 let rqs = rqs.clone();
+                let airdrop = airdrop.clone();
                 let msg_tx = msg_tx.clone();
                 let disc_tx = disc_tx.clone();
                 let send_tx = send_tx.clone();
                 let vis_tx = vis_tx.clone();
                 let auto_accept = auto_accept.clone();
-                let ad_disc_ctk = ad_disc_ctk.clone();
 
                 tokio::spawn(async move {
                     if let Err(e) = handle_conn(
@@ -324,12 +330,12 @@ async fn serve_bridge(
                         device_name,
                         airdrop_port,
                         rqs,
+                        airdrop,
                         msg_tx,
                         disc_tx,
                         send_tx,
                         vis_tx,
                         auto_accept,
-                        ad_disc_ctk,
                     )
                     .await
                     {
@@ -348,12 +354,12 @@ async fn handle_conn(
     device_name: String,
     airdrop_port: u16,
     rqs: Arc<Mutex<RQS>>,
+    airdrop: AirDropManager,
     msg_tx: broadcast::Sender<ChannelMessage>,
     disc_tx: broadcast::Sender<EndpointInfo>,
     send_tx: mpsc::Sender<SendInfo>,
     vis_tx: Arc<Mutex<watch::Sender<Visibility>>>,
     auto_accept: Arc<AtomicBool>,
-    ad_disc_ctk: Arc<Mutex<Option<CancellationToken>>>,
 ) -> Result<(), anyhow::Error> {
     let mut buf = vec![0u8; 32768];
     let n = stream.read(&mut buf).await?;
@@ -386,6 +392,7 @@ async fn handle_conn(
                 (v, guard.port_number, dl, guard.get_device_name())
             };
             let (system_accent, system_color_scheme) = read_system_theme().await;
+            let ad_status = airdrop.status().await;
             let status = StatusResponse {
                 device_name: if live_name.is_empty() { device_name } else { live_name },
                 visibility: vis,
@@ -399,6 +406,7 @@ async fn handle_conn(
                 system_color_scheme,
                 system_lang: aethershare_core::i18n::detect_system_lang().code().to_string(),
                 version: aethershare_core::APP_VERSION.to_string(),
+                airdrop: ad_status,
             };
             write_json(&mut stream, &serde_json::to_vec(&status)?).await?;
         }
@@ -432,23 +440,36 @@ async fn handle_conn(
                 let mut guard = rqs.lock().unwrap();
                 let _ = guard.discovery(disc_tx.clone());
             }
-            if let Ok(ad_disc) = AirDropMdnsDiscovery::new(disc_tx) {
-                let c = CancellationToken::new();
-                if let Some(old) = ad_disc_ctk.lock().unwrap().replace(c.clone()) {
-                    old.cancel();
-                }
-                tokio::spawn(async move {
-                    let _ = ad_disc.run(c).await;
-                });
-            }
+            let _ = airdrop.start_discovery().await;
             write_json(&mut stream, br#"{"ok":true}"#).await?;
         }
         ("POST", "/api/discovery/stop") => {
             rqs.lock().unwrap().stop_discovery();
-            if let Some(old) = ad_disc_ctk.lock().unwrap().take() {
-                old.cancel();
-            }
+            airdrop.stop_discovery().await;
             write_json(&mut stream, br#"{"ok":true}"#).await?;
+        }
+        ("POST", "/api/airdrop/enable") => {
+            match airdrop.enable().await {
+                Ok(st) => {
+                    let body = serde_json::to_vec(&serde_json::json!({ "ok": true, "airdrop": st }))?;
+                    write_json(&mut stream, &body).await?;
+                }
+                Err(e) => {
+                    warn!("POST /api/airdrop/enable failed: {e}");
+                    let st = airdrop.probe().await;
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "ok": false,
+                        "error": e.to_string(),
+                        "airdrop": st
+                    }))?;
+                    write_json(&mut stream, &body).await?;
+                }
+            }
+        }
+        ("POST", "/api/airdrop/disable") => {
+            let st = airdrop.disable().await.unwrap_or_else(|_| AirDropRadioStatus::default());
+            let body = serde_json::to_vec(&serde_json::json!({ "ok": true, "airdrop": st }))?;
+            write_json(&mut stream, &body).await?;
         }
         ("POST", "/api/visibility") => {
             if let Ok(req) = serde_json::from_str::<VisibilityRequest>(body) {
@@ -481,12 +502,14 @@ async fn handle_conn(
                 if !expanded.is_empty() {
                     if req.protocol.as_deref() == Some("airdrop") || req.id.starts_with("airdrop://")
                     {
-                        let addr = req.id.strip_prefix("airdrop://").unwrap_or(&req.addr).to_string();
                         let paths: Vec<PathBuf> = expanded.iter().map(PathBuf::from).collect();
-                        let sender_name = device_name.clone();
+                        let ad = airdrop.clone();
+                        let id = req.id.clone();
+                        let peer_name = req.name.clone();
                         tokio::spawn(async move {
-                            let client = AirDropClient::new(sender_name, true);
-                            let _ = client.send_files(&addr, &paths).await;
+                            if let Err(e) = ad.send_files(id, peer_name, paths).await {
+                                warn!("AirDrop send failed: {e}");
+                            }
                         });
                     } else {
                         let _ = send_tx
@@ -539,7 +562,8 @@ async fn handle_conn(
                 }
                 if let Some(name) = patch.device_name {
                     if !name.trim().is_empty() {
-                        rqs.lock().unwrap().set_device_name(name);
+                        rqs.lock().unwrap().set_device_name(name.clone());
+                        airdrop.set_device_name(name).await;
                     }
                 }
                 if let Some(lang) = patch.language {
