@@ -34,6 +34,18 @@ pub const MAX_DISCOVERY_TTL_SECS: u64 = 3600;
 /// Minimum allowed discovery session TTL (5 seconds).
 pub const MIN_DISCOVERY_TTL_SECS: u64 = 5;
 
+/// Max age before an unrefreshed BLE transport is considered stale (20s).
+const BLE_STALE_MS: u64 = 20_000;
+/// Max age before an unrefreshed AirDrop AWDL transport is considered stale (25s).
+const AIRDROP_STALE_MS: u64 = 25_000;
+/// Max age before an unrefreshed Quick Share LAN transport is considered stale (90s).
+const LAN_STALE_MS: u64 = 90_000;
+/// Window within which two distinct BLE MACs with the same device name are treated as
+/// two separate physical phones advertising simultaneously (one 3s BLE scan burst).
+/// Outside this window, a new random BLE MAC with the same name is treated as Android's
+/// periodic LE address rotation and updates the existing `device_id` in place.
+const BLE_ROTATION_WINDOW_MS: u64 = 4_000;
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -256,12 +268,14 @@ struct LanTransport {
     ip: String,
     port: String,
     present: bool,
+    last_seen_ms: u64,
 }
 
 #[derive(Debug, Clone)]
 struct BleTransport {
     ble_addr: String,
     present: bool,
+    last_seen_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +283,7 @@ struct AirDropTransport {
     endpoint_id: String,
     ipv6_core: String,
     present: bool,
+    last_seen_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -404,8 +419,60 @@ impl DeviceRegistry {
         self.events_tx.subscribe()
     }
 
+    /// Expires any transport that has not been refreshed within its staleness TTL
+    /// and emits normalized `device` (`upsert` / `removed`) events over SSE.
+    pub fn prune_stale(&self) -> usize {
+        self.prune_stale_at(now_ms())
+    }
+
+    fn prune_stale_at(&self, now: u64) -> usize {
+        let mut records = self.records.lock().unwrap();
+        let mut events_to_send: Vec<ApiDeviceEvent> = Vec::new();
+
+        for rec in records.values_mut() {
+            let mut changed = false;
+            if let Some(l) = rec.lan.as_mut() {
+                if l.present && now.saturating_sub(l.last_seen_ms) > LAN_STALE_MS {
+                    l.present = false;
+                    changed = true;
+                }
+            }
+            if let Some(b) = rec.ble.as_mut() {
+                if b.present && now.saturating_sub(b.last_seen_ms) > BLE_STALE_MS {
+                    b.present = false;
+                    changed = true;
+                }
+            }
+            if let Some(a) = rec.airdrop.as_mut() {
+                if a.present && now.saturating_sub(a.last_seen_ms) > AIRDROP_STALE_MS {
+                    a.present = false;
+                    changed = true;
+                }
+            }
+            if changed {
+                let still_reachable = rec.is_reachable();
+                events_to_send.push(ApiDeviceEvent {
+                    event_type: if still_reachable {
+                        "upsert".into()
+                    } else {
+                        "removed".into()
+                    },
+                    device: rec.to_api(false),
+                });
+            }
+        }
+        drop(records);
+
+        let count = events_to_send.len();
+        for ev in events_to_send {
+            let _ = self.events_tx.send(ev);
+        }
+        count
+    }
+
     /// Returns an immediate snapshot of all currently reachable unified devices.
     pub fn list_reachable(&self) -> Vec<ApiDevice> {
+        self.prune_stale();
         let guard = self.records.lock().unwrap();
         let reachable: Vec<&DeviceRecord> = guard.values().filter(|r| r.is_reachable()).collect();
         let mut name_counts: HashMap<String, usize> = HashMap::new();
@@ -524,6 +591,7 @@ impl DeviceRegistry {
                 endpoint_id: ei.id.clone(),
                 ipv6_core,
                 present: true,
+                last_seen_ms: ts,
             });
             rec.last_seen_ms = ts;
             raw_index.insert(ei.id.clone(), dev_id.clone());
@@ -548,17 +616,45 @@ impl DeviceRegistry {
                 })
                 .map(|r| r.device_id.clone());
 
-            // 2. Otherwise merge onto a Quick Share LAN-only record with the exact same name
-            //    (only if that record does NOT already have a different BLE address, so two
-            //    same-named phones with different BLE MACs stay distinct!).
+            // 2. Merge onto a Quick Share LAN record with the exact same name if it has no
+            //    active BLE from this same scan burst (handles both initial LAN+BLE merge and
+            //    Android's periodic BLE random MAC rotation without collapsing two distinct
+            //    same-named phones advertising simultaneously!).
             let by_lan_merge = if by_mac.is_none() {
                 records
                     .values()
                     .find(|r| {
                         r.protocol == "quickshare"
                             && r.lan.as_ref().map(|l| l.present).unwrap_or(false)
-                            && r.ble.is_none()
                             && r.name.trim().to_ascii_lowercase() == norm_name
+                            && match &r.ble {
+                                None => true,
+                                Some(b) => {
+                                    !b.present
+                                        || ts.saturating_sub(b.last_seen_ms) >= BLE_ROTATION_WINDOW_MS
+                                }
+                            }
+                    })
+                    .map(|r| r.device_id.clone())
+            } else {
+                None
+            };
+
+            // 3. Otherwise reuse an existing BLE-only record with the exact same name whose
+            //    previous random MAC has rotated (not seen in the current 3s scan burst).
+            let by_ble_rotation = if by_mac.is_none() && by_lan_merge.is_none() {
+                records
+                    .values()
+                    .find(|r| {
+                        r.protocol == "quickshare"
+                            && r.name.trim().to_ascii_lowercase() == norm_name
+                            && r.ble
+                                .as_ref()
+                                .map(|b| {
+                                    !b.present
+                                        || ts.saturating_sub(b.last_seen_ms) >= BLE_ROTATION_WINDOW_MS
+                                })
+                                .unwrap_or(false)
                     })
                     .map(|r| r.device_id.clone())
             } else {
@@ -567,6 +663,7 @@ impl DeviceRegistry {
 
             let dev_id = by_mac
                 .or(by_lan_merge)
+                .or(by_ble_rotation)
                 .unwrap_or_else(|| format!("dev_{}", short_hash(&format!("qs-ble:{ble_addr}"))));
 
             let rec = records.entry(dev_id.clone()).or_insert_with(|| DeviceRecord {
@@ -586,6 +683,7 @@ impl DeviceRegistry {
             rec.ble = Some(BleTransport {
                 ble_addr,
                 present: true,
+                last_seen_ms: ts,
             });
             rec.last_seen_ms = ts;
             raw_index.insert(ei.id.clone(), dev_id.clone());
@@ -609,15 +707,15 @@ impl DeviceRegistry {
                 .map(|r| r.device_id.clone());
 
             // 2. Otherwise merge onto a Quick Share BLE-only record with the exact same name
-            //    (only if that record does NOT already have a different LAN IP/endpoint_id, so
-            //    two same-named devices on LAN stay distinct!).
+            //    (only if that record does NOT already have a different active LAN IP/endpoint_id,
+            //    so two same-named devices on LAN stay distinct!).
             let by_ble_merge = if by_lan.is_none() {
                 records
                     .values()
                     .find(|r| {
                         r.protocol == "quickshare"
                             && r.ble.as_ref().map(|b| b.present).unwrap_or(false)
-                            && r.lan.is_none()
+                            && r.lan.as_ref().map(|l| !l.present).unwrap_or(true)
                             && r.name.trim().to_ascii_lowercase() == norm_name
                     })
                     .map(|r| r.device_id.clone())
@@ -653,6 +751,7 @@ impl DeviceRegistry {
                 ip,
                 port,
                 present: true,
+                last_seen_ms: ts,
             });
             rec.last_seen_ms = ts;
             raw_index.insert(ei.id.clone(), dev_id.clone());
@@ -1315,5 +1414,31 @@ mod tests {
         );
         assert!(replay2);
         assert_eq!(t2.transfer_id, t1.transfer_id);
+    }
+
+    #[test]
+    fn stale_ble_devices_expire_and_emit_removed() {
+        let reg = DeviceRegistry::new();
+        let mut rx = reg.subscribe();
+        let ev = reg
+            .ingest(&EndpointInfo {
+                id: "ble://Cachy".into(),
+                name: Some("Cachy".into()),
+                ble_addr: Some("28:95:29:8E:D8:1F".into()),
+                rtype: Some(DeviceType::Laptop),
+                present: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(reg.list_reachable().len(), 1);
+        let _ = rx.try_recv();
+
+        // Advance time past BLE_STALE_MS
+        let expired = reg.prune_stale_at(ev.device.last_seen_ms + BLE_STALE_MS + 1);
+        assert_eq!(expired, 1);
+        assert!(reg.list_reachable().is_empty());
+        let rem = rx.try_recv().unwrap();
+        assert_eq!(rem.event_type, "removed");
+        assert_eq!(rem.device.device_id, ev.device.device_id);
     }
 }

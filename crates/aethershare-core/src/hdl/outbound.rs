@@ -93,6 +93,30 @@ impl WifiUpgradable for TcpStream {
     }
 }
 
+/// Resolves ONLY when a `TransferCancel` action arrives for `transfer_id`.
+/// Ignoring unrelated broadcasts (such as our own state/PIN/progress updates)
+/// ensures `stream_read_exact` inside `OutboundRequest::handle` is never
+/// spuriously cancelled mid-frame.
+async fn recv_cancel(rx: &mut Receiver<ChannelMessage>, transfer_id: &str) {
+    loop {
+        match rx.recv().await {
+            Ok(cm) if cm.id == transfer_id => {
+                if let channel::Message::Lib {
+                    action: TransferAction::TransferCancel,
+                } = cm.msg
+                {
+                    return;
+                }
+            }
+            Ok(_) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
 /// Read one plaintext `[u32 len][frame]` message (the new TCP channel during a
 /// bandwidth upgrade, before encryption resumes).
 async fn read_plain_frame<R: tokio::io::AsyncRead + Unpin>(
@@ -254,44 +278,30 @@ impl<S: AsyncRead + AsyncWrite + Unpin + WifiUpgradable> OutboundRequest<S> {
     pub async fn handle(&mut self) -> Result<(), anyhow::Error> {
         // Buffer for the 4-byte length
         let mut length_buf = [0u8; 4];
+        let transfer_id = self.state.id.clone();
 
-        tokio::select! {
-            i = self.receiver.recv() => {
-                match i {
-                    Ok(channel_msg) => {
-                        if channel_msg.id != self.state.id {
-                            return Ok(());
-                        }
-
-                        if let channel::Message::Lib { action }  = &channel_msg.msg {
-                            debug!("outbound: got: {:?}", channel_msg);
-                            match action {
-                                TransferAction::TransferCancel => {
-                                    self.update_state(
-                                        |e| {
-                                            e.state = TransferState::Cancelled;
-                                        },
-                                        true,
-                                    ).await;
-                                    self.disconnection().await?;
-                                    return Err(anyhow!(crate::errors::AppError::NotAnError));
-                                },
-                                _ => {}
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("inbound: channel error: {}", e);
-                    }
-                }
-            },
+        let got_cancel = tokio::select! {
+            _ = recv_cancel(&mut self.receiver, &transfer_id) => true,
             h = stream_read_exact(&mut self.socket, &mut length_buf) => {
                 h?;
-
-                self._handle(length_buf).await?
+                false
             }
+        };
+
+        if got_cancel {
+            debug!("outbound: TransferCancel received for {}", self.state.id);
+            self.update_state(
+                |e| {
+                    e.state = TransferState::Cancelled;
+                },
+                true,
+            )
+            .await;
+            let _ = self.disconnection().await;
+            return Err(anyhow!(crate::errors::AppError::NotAnError));
         }
 
+        self._handle(length_buf).await?;
         Ok(())
     }
 

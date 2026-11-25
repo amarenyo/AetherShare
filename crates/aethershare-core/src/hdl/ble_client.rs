@@ -260,6 +260,36 @@ pub async fn scan_once(
 /// Collects every visible receiver seen during a full `window` (unlike
 /// [`scan_once`], which stops at the first). Used by the discovery loop.
 async fn scan_all(adapter: &Adapter, window: Duration) -> Result<Vec<BleTarget>, anyhow::Error> {
+    let uuid = Uuid::from_u16(QS_SERVICE_UUID);
+
+    // Purge stale temporary (unpaired, unbonded, disconnected) Quick Share
+    // beacons from BlueZ's cache before scanning. Otherwise BlueZ replays
+    // hours-old devices (with cached RSSI/ServiceData) on DeviceAdded even
+    // after the remote device has powered off or rotated its random LE address.
+    // Actively broadcasting devices reappear within ~100-500ms of starting the scan.
+    if let Ok(existing) = adapter.device_addresses().await {
+        for addr in existing {
+            if let Ok(dev) = adapter.device(addr) {
+                let has_qs = dev
+                    .service_data()
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|sd| sd.contains_key(&uuid))
+                    .unwrap_or(false);
+                if !has_qs {
+                    continue;
+                }
+                let paired = dev.is_paired().await.unwrap_or(true);
+                let trusted = dev.is_trusted().await.unwrap_or(true);
+                let connected = dev.is_connected().await.unwrap_or(true);
+                if !paired && !trusted && !connected {
+                    let _ = adapter.remove_device(addr).await;
+                }
+            }
+        }
+    }
+
     if let Err(e) = adapter
         .set_discovery_filter(DiscoveryFilter {
             transport: DiscoveryTransport::Le,
@@ -271,7 +301,6 @@ async fn scan_all(adapter: &Adapter, window: Duration) -> Result<Vec<BleTarget>,
         debug!("{INNER_NAME}: set_discovery_filter: {e} (proceeding)");
     }
     let mut events = adapter.discover_devices_with_changes().await?;
-    let uuid = Uuid::from_u16(QS_SERVICE_UUID);
     let deadline = Instant::now() + window;
     let mut targets: HashMap<Address, BleTarget> = HashMap::new();
 
@@ -335,6 +364,7 @@ pub async fn ble_discovery(sender: Sender<EndpointInfo>, ctk: CancellationToken)
     info!("{INNER_NAME}: BLE recipient discovery starting");
 
     let mut missed_counts: HashMap<String, u8> = HashMap::new();
+    let mut last_addrs: HashMap<String, String> = HashMap::new();
     loop {
         if ctk.is_cancelled() {
             break;
@@ -345,14 +375,16 @@ pub async fn ble_discovery(sender: Sender<EndpointInfo>, ctk: CancellationToken)
                     std::collections::HashSet::new();
                 for t in found {
                     let id = format!("ble://{}", t.rdi.name);
+                    let addr_str = t.addr.to_string();
                     seen_this_round.insert(id.clone());
                     missed_counts.insert(id.clone(), 0);
+                    last_addrs.insert(id.clone(), addr_str.clone());
                     let _ = sender.send(EndpointInfo {
                         id,
                         name: Some(t.rdi.name.clone()),
                         rtype: Some(t.rdi.device_type),
                         present: Some(true),
-                        ble_addr: Some(t.addr.to_string()),
+                        ble_addr: Some(addr_str),
                         ble_psm: Some(t.psm),
                         protocol: Some("quickshare".to_string()),
                         ..Default::default()
@@ -369,8 +401,10 @@ pub async fn ble_discovery(sender: Sender<EndpointInfo>, ctk: CancellationToken)
                 }
                 for id in stale {
                     missed_counts.remove(&id);
+                    let ble_addr = last_addrs.remove(&id);
                     let _ = sender.send(EndpointInfo {
                         id,
+                        ble_addr,
                         present: Some(false),
                         ..Default::default()
                     });

@@ -200,8 +200,9 @@ pub fn expand_file_paths(raw: &[String]) -> Vec<String> {
     out
 }
 
-/// Spawns a background reaper that prunes expired discovery sessions every 10s
-/// and stops hardware scanning if the last session expires (e.g. crashed widget).
+/// Spawns a background reaper that prunes expired discovery sessions and stale
+/// unrefreshed devices every 5s, stopping hardware scanning if the last session
+/// expires (e.g. crashed widget).
 pub fn spawn_session_reaper(
     api_v1: ApiV1State,
     rqs: Arc<Mutex<RQS>>,
@@ -209,11 +210,12 @@ pub fn spawn_session_reaper(
     ctk: CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(10));
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
         loop {
             tokio::select! {
                 _ = ctk.cancelled() => break,
                 _ = tick.tick() => {
+                    api_v1.devices.prune_stale();
                     let (should_stop, _) = api_v1.discovery.prune_expired();
                     if should_stop {
                         info!("api_v1: all discovery sessions expired; stopping hardware scan");
