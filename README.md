@@ -30,6 +30,9 @@
   - Apple Continuity BLE wake-up advertisement (`0x004C`) via BlueZ, burst mDNS responder, AWDL peer `/Discover` probing, TLS `/Ask` & `/Upload`, and sandboxed extraction.
   - **Automatic mode detection:** runs seamlessly alongside Wi-Fi on Shared-mode Wi-Fi cards (e.g. MediaTek MT7925, Realtek RTL8852) and offers a one-click **AirDrop Mode** toggle on Exclusive-mode cards (e.g. Intel AX200/AX201/AX210, pausing Wi-Fi while active and automatically reconnecting when turned off).
   - *Note:* Set your Apple device's AirDrop visibility to **"Everyone for 10 minutes"**. Portable `.AppImage` builds do not install the system AWDL daemon; use `.rpm`, `.deb`, or `.pkg.tar.zst` for all-in-one AirDrop support.
+- **Versioned Local API v1 & Session D-Bus Auto-Activation (`docs/API.md`):**
+  - Token-authenticated local HTTP/SSE API (`/api/v1`) designed for KDE Plasma widgets / Dynamic Islands, companion frontends, and scripts: immediate merged device snapshots, multi-surface refcounted discovery sessions, stable `device_id`s with automatic transport selection, idempotent transfers (`request_id`), normalized progress events, and cancellation.
+  - Session D-Bus service (`org.aethershare.Service`) auto-activates `aethershare-desktop --background` silently in the system tray on demand. See [`docs/API.md`](docs/API.md) for the complete reference and integration examples.
 - **CLI & Headless Daemon (`aethershare-cli`):**
   - `aethershare doctor` — System, interface, Bluetooth & mDNS diagnostics
   - `aethershare ui` — Launches the local daemon + embedded web UI (`http://127.0.0.1:8787`)

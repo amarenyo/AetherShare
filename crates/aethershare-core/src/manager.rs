@@ -183,6 +183,7 @@ impl TcpServer {
         #[cfg(all(feature = "experimental", target_os = "linux"))]
         let socket = crate::hdl::MigratableStream::Tcp(socket);
 
+        let report_id = si.id.clone();
         let mut or = OutboundRequest::new(
             self.endpoint_id,
             socket,
@@ -200,7 +201,7 @@ impl TcpServer {
         // Send UKEY init
         or.send_ukey2_client_init().await?;
 
-        self.drive_outbound(ctk, or, si.addr).await;
+        self.drive_outbound(ctk, or, report_id).await;
         Ok(())
     }
 
@@ -330,11 +331,29 @@ impl TcpServer {
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + crate::hdl::WifiUpgradable,
     {
+        let mut cancel_rx = self.sender.subscribe();
         loop {
             tokio::select! {
                 _ = ctk.cancelled() => {
                     info!("{INNER_NAME}: tracker cancelled, breaking");
                     break;
+                },
+                Ok(cm) = cancel_rx.recv() => {
+                    if cm.id == report_id {
+                        if let channel::Message::Lib { action: channel::TransferAction::TransferCancel } = cm.msg {
+                            info!("{INNER_NAME}: outbound transfer {report_id} cancelled by local user");
+                            or.state.state = TransferState::Cancelled;
+                            let _ = self.sender.send(ChannelMessage {
+                                id: report_id.clone(),
+                                msg: channel::Message::Client(MessageClient {
+                                    kind: TransferKind::Outbound,
+                                    state: Some(TransferState::Cancelled),
+                                    metadata: Default::default(),
+                                }),
+                            });
+                            break;
+                        }
+                    }
                 },
                 r = or.handle() => {
                     if let Err(e) = r {

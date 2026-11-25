@@ -10,6 +10,7 @@
 pub mod archive;
 pub mod awdl;
 pub mod ble;
+pub mod bridge_v1;
 pub mod client;
 pub mod mdns;
 pub mod plist_codec;

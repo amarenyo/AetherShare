@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "aethershare-airdrop"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "aethershare-core",
  "anyhow",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "aethershare-core"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "aethershare-proto",
  "anyhow",
@@ -67,6 +67,7 @@ dependencies = [
  "prost",
  "rand",
  "serde",
+ "serde_json",
  "sha2 0.11.1",
  "sys_metrics",
  "tokio",
@@ -76,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "aethershare-desktop"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "aethershare-airdrop",
  "aethershare-core",
@@ -91,11 +92,12 @@ dependencies = [
  "tauri-build",
  "tokio",
  "tokio-util",
+ "zbus",
 ]
 
 [[package]]
 name = "aethershare-proto"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

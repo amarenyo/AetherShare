@@ -22,6 +22,7 @@ use crate::hdl::BleListener;
 use crate::hdl::MDnsServer;
 use crate::manager::TcpServer;
 
+pub mod api_v1;
 pub mod channel;
 pub mod errors;
 pub mod hdl;

@@ -10,7 +10,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use aethershare_airdrop::bridge_v1::{
+    V1Context, expand_file_paths, handle_v1_request, read_http_request, spawn_session_reaper,
+};
 use aethershare_airdrop::{AirDropManager, AirDropRadioStatus};
+use aethershare_core::api_v1::ApiV1State;
 use aethershare_core::channel::{ChannelMessage, Message, TransferAction};
 use aethershare_core::net_filter::{diagnose_interfaces, filtered_ipv4_addrs};
 use aethershare_core::{EndpointInfo, OutboundPayload, RQS, SendInfo, Visibility};
@@ -19,19 +23,94 @@ use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{DragDropEvent, Manager, WindowEvent};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 const BRIDGE_PORT: u16 = 8787;
 const AIRDROP_PORT: u16 = aethershare_airdrop::awdl::LOCAL_AIRDROP_PORT;
+const DBUS_SERVICE_NAME: &str = "org.aethershare.Service";
+const DBUS_OBJECT_PATH: &str = "/org/aethershare/Service";
 
 struct EngineHandle {
     rqs: Arc<Mutex<RQS>>,
     airdrop: AirDropManager,
+    api_v1: ApiV1State,
     rt: Arc<tokio::runtime::Runtime>,
     ctk: CancellationToken,
+}
+
+/// Session D-Bus service (`org.aethershare.Service`) allowing KDE Plasma widgets
+/// and desktop tools to auto-activate AetherShare silently (`--background`),
+/// query API discovery metadata, focus the main window, or quit cleanly.
+struct AetherShareDbusService {
+    api_url: String,
+    token_file: String,
+    app_handle: tauri::AppHandle,
+    airdrop: AirDropManager,
+    ctk: CancellationToken,
+}
+
+#[zbus::interface(name = "org.aethershare.Service")]
+impl AetherShareDbusService {
+    async fn ping(&self) -> String {
+        "pong".to_string()
+    }
+
+    async fn get_api_info(&self) -> (String, String, String) {
+        (
+            self.api_url.clone(),
+            self.token_file.clone(),
+            aethershare_core::APP_VERSION.to_string(),
+        )
+    }
+
+    async fn show_window(&self) -> bool {
+        if let Some(w) = self.app_handle.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+            return true;
+        }
+        false
+    }
+
+    async fn quit(&self) {
+        let _ = self.airdrop.disable().await;
+        self.ctk.cancel();
+        self.app_handle.exit(0);
+    }
+}
+
+/// Checks whether another AetherShare instance already owns `org.aethershare.Service`
+/// without triggering D-Bus activation. If found and `!start_background`, focuses the
+/// existing window and returns `true` so the caller can exit cleanly.
+async fn try_delegate_to_existing_instance(start_background: bool) -> bool {
+    let Ok(conn) = zbus::Connection::session().await else {
+        return false;
+    };
+    let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await else {
+        return false;
+    };
+    let Ok(bus_name) = zbus::names::BusName::try_from(DBUS_SERVICE_NAME) else {
+        return false;
+    };
+    if !dbus.name_has_owner(bus_name).await.unwrap_or(false) {
+        return false;
+    }
+    if !start_background {
+        let _ = conn
+            .call_method(
+                Some(DBUS_SERVICE_NAME),
+                DBUS_OBJECT_PATH,
+                Some(DBUS_SERVICE_NAME),
+                "ShowWindow",
+                &(),
+            )
+            .await;
+    }
+    true
 }
 
 fn default_download_dir() -> String {
@@ -50,6 +129,8 @@ fn main() {
         .format_timestamp_secs()
         .init();
 
+    let start_background = std::env::args().any(|a| a == "--background" || a == "--hidden");
+
     let rt = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -57,89 +138,154 @@ fn main() {
             .expect("Failed to initialize Tokio runtime"),
     );
 
+    if rt.block_on(try_delegate_to_existing_instance(start_background)) {
+        info!("AetherShare is already running on Session D-Bus; delegating and exiting.");
+        return;
+    }
+
     let device_name =
         sys_metrics::host::get_hostname().unwrap_or_else(|_| "AetherShare".to_string());
     let ctk = CancellationToken::new();
     let auto_accept = Arc::new(AtomicBool::new(false));
 
     // Start the full AetherShare Quick Share + AWDL AirDrop + Local Bridge Engine
-    let (rqs_shared, airdrop_mgr): (Arc<Mutex<RQS>>, AirDropManager) = rt.block_on(async {
-        let mut rqs = RQS::new(Visibility::Visible, None, None, Some(device_name.clone()));
-        let (send_tx, _ble_rx) = rqs.run().await.expect("Failed to start AetherShare core");
-        let msg_tx = rqs.message_sender.clone();
-        let vis_tx = rqs.visibility_sender.clone();
+    let (rqs_shared, airdrop_mgr, api_v1): (Arc<Mutex<RQS>>, AirDropManager, ApiV1State) =
+        rt.block_on(async {
+            let mut rqs = RQS::new(Visibility::Visible, None, None, Some(device_name.clone()));
+            let (send_tx, _ble_rx) = rqs.run().await.expect("Failed to start AetherShare core");
+            let msg_tx = rqs.message_sender.clone();
+            let vis_tx = rqs.visibility_sender.clone();
 
-        // Interactive desktop notifications ([Accept]/[Decline], native KDE JobViewV2 progress bar, [Open])
-        aethershare_core::notifications::spawn_transfer_notifications(
-            msg_tx.clone(),
-            auto_accept.clone(),
-        );
-
-        let (disc_tx, _) = broadcast::channel::<EndpointInfo>(64);
-        let airdrop = AirDropManager::new(
-            device_name.clone(),
-            auto_accept.clone(),
-            msg_tx.clone(),
-            disc_tx.clone(),
-        );
-
-        // Probe AWDL radio daemon (`aethershare-awdld` / `owlyd`).
-        // In Shared mode (Wi-Fi stays connected), auto-enable AirDrop seamlessly.
-        // In Exclusive mode (e.g. Intel AX201), wait for the user to toggle AirDrop Mode.
-        let ad_startup = airdrop.clone();
-        tokio::spawn(async move {
-            let st = ad_startup.probe().await;
-            info!(
-                "AirDrop AWDL probe: available={}, mode={}, driver={:?}, device={:?}",
-                st.available, st.mode, st.driver, st.device
+            // Interactive desktop notifications ([Accept]/[Decline], native KDE JobViewV2 progress bar, [Open])
+            aethershare_core::notifications::spawn_transfer_notifications(
+                msg_tx.clone(),
+                auto_accept.clone(),
             );
-            if st.available && st.mode == "shared" {
-                if let Err(e) = ad_startup.enable().await {
-                    warn!("AirDrop auto-enable in shared mode failed: {e}");
+
+            let (disc_tx, _) = broadcast::channel::<EndpointInfo>(64);
+            let airdrop = AirDropManager::new(
+                device_name.clone(),
+                auto_accept.clone(),
+                msg_tx.clone(),
+                disc_tx.clone(),
+            );
+
+            // Versioned local API v1 state (token auth, merged device registry, multi-client
+            // discovery sessions, idempotent transfer tracker)
+            let api_v1 = ApiV1State::new(BRIDGE_PORT, msg_tx.clone(), disc_tx.clone());
+            info!(
+                "Local API v1 metadata written to {}",
+                api_v1.auth.info_path().display()
+            );
+
+            // Probe AWDL radio daemon (`aethershare-awdld` / `owlyd`).
+            // In Shared mode (Wi-Fi stays connected), auto-enable AirDrop seamlessly.
+            // In Exclusive mode (e.g. Intel AX201), wait for the user to toggle AirDrop Mode.
+            let ad_startup = airdrop.clone();
+            tokio::spawn(async move {
+                let st = ad_startup.probe().await;
+                info!(
+                    "AirDrop AWDL probe: available={}, mode={}, driver={:?}, device={:?}",
+                    st.available, st.mode, st.driver, st.device
+                );
+                if st.available && st.mode == "shared" {
+                    if let Err(e) = ad_startup.enable().await {
+                        warn!("AirDrop auto-enable in shared mode failed: {e}");
+                    }
                 }
-            }
+            });
+
+            let rqs_arc = Arc::new(Mutex::new(rqs));
+            spawn_session_reaper(api_v1.clone(), rqs_arc.clone(), airdrop.clone(), ctk.clone());
+
+            let rqs_bridge = rqs_arc.clone();
+            let ad_bridge = airdrop.clone();
+            let api_v1_bridge = api_v1.clone();
+            let bridge_ctk = ctk.clone();
+            let bridge_name = device_name.clone();
+            let aa_bridge = auto_accept.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = serve_bridge(
+                    BRIDGE_PORT,
+                    bridge_name,
+                    AIRDROP_PORT,
+                    rqs_bridge,
+                    ad_bridge,
+                    api_v1_bridge,
+                    msg_tx,
+                    disc_tx,
+                    send_tx,
+                    vis_tx,
+                    aa_bridge,
+                    bridge_ctk,
+                )
+                .await
+                {
+                    error!("Desktop bridge error: {e}");
+                }
+            });
+
+            (rqs_arc, airdrop, api_v1)
         });
-
-        let rqs_arc = Arc::new(Mutex::new(rqs));
-        let rqs_bridge = rqs_arc.clone();
-        let ad_bridge = airdrop.clone();
-        let bridge_ctk = ctk.clone();
-        let bridge_name = device_name.clone();
-        let aa_bridge = auto_accept.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = serve_bridge(
-                BRIDGE_PORT,
-                bridge_name,
-                AIRDROP_PORT,
-                rqs_bridge,
-                ad_bridge,
-                msg_tx,
-                disc_tx,
-                send_tx,
-                vis_tx,
-                aa_bridge,
-                bridge_ctk,
-            )
-            .await
-            {
-                error!("Desktop bridge error: {e}");
-            }
-        });
-
-        (rqs_arc, airdrop)
-    });
 
     let engine = EngineHandle {
         rqs: rqs_shared,
         airdrop: airdrop_mgr,
+        api_v1,
         rt: rt.clone(),
         ctk,
     };
 
     tauri::Builder::default()
         .manage(engine)
-        .setup(|app| {
+        .setup(move |app| {
+            if start_background {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+                info!("Started in --background mode (hidden in system tray)");
+            }
+
+            // Register Session D-Bus service (`org.aethershare.Service`) for widget auto-activation
+            {
+                let eng = app.state::<EngineHandle>();
+                let dbus_ctk = eng.ctk.clone();
+                let dbus_svc = AetherShareDbusService {
+                    api_url: eng.api_v1.auth.base_url().to_string(),
+                    token_file: eng.api_v1.auth.token_path().to_string_lossy().to_string(),
+                    app_handle: app.handle().clone(),
+                    airdrop: eng.airdrop.clone(),
+                    ctk: eng.ctk.clone(),
+                };
+                eng.rt.spawn(async move {
+                    match zbus::connection::Builder::session() {
+                        Ok(b) => match b.name(DBUS_SERVICE_NAME) {
+                            Ok(b) => match b.serve_at(DBUS_OBJECT_PATH, dbus_svc) {
+                                Ok(b) => match b.build().await {
+                                    Ok(_conn) => {
+                                        info!(
+                                            "Session D-Bus service registered: {DBUS_SERVICE_NAME} ({DBUS_OBJECT_PATH})"
+                                        );
+                                        dbus_ctk.cancelled().await;
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to build Session D-Bus connection: {e}")
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!("Failed to attach D-Bus object {DBUS_OBJECT_PATH}: {e}")
+                                }
+                            },
+                            Err(e) => {
+                                warn!("Failed to request D-Bus name {DBUS_SERVICE_NAME}: {e}")
+                            }
+                        },
+                        Err(e) => warn!("Session D-Bus unavailable: {e}"),
+                    }
+                });
+            }
+
             let s = aethershare_core::i18n::strings();
             let show_i = MenuItem::with_id(app, "show", s.tray_open, true, None::<&str>)?;
             let vis_all =
@@ -300,6 +446,7 @@ async fn serve_bridge(
     airdrop_port: u16,
     rqs: Arc<Mutex<RQS>>,
     airdrop: AirDropManager,
+    api_v1: ApiV1State,
     msg_tx: broadcast::Sender<ChannelMessage>,
     disc_tx: broadcast::Sender<EndpointInfo>,
     send_tx: mpsc::Sender<SendInfo>,
@@ -308,7 +455,7 @@ async fn serve_bridge(
     ctk: CancellationToken,
 ) -> Result<(), anyhow::Error> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-    info!("AetherShare Desktop Bridge listening on http://127.0.0.1:{port}");
+    info!("AetherShare Desktop Bridge listening on http://127.0.0.1:{port} (API v1 enabled)");
 
     loop {
         tokio::select! {
@@ -318,6 +465,7 @@ async fn serve_bridge(
                 let device_name = device_name.clone();
                 let rqs = rqs.clone();
                 let airdrop = airdrop.clone();
+                let api_v1 = api_v1.clone();
                 let msg_tx = msg_tx.clone();
                 let disc_tx = disc_tx.clone();
                 let send_tx = send_tx.clone();
@@ -331,6 +479,7 @@ async fn serve_bridge(
                         airdrop_port,
                         rqs,
                         airdrop,
+                        api_v1,
                         msg_tx,
                         disc_tx,
                         send_tx,
@@ -348,71 +497,6 @@ async fn serve_bridge(
     Ok(())
 }
 
-async fn read_http_request(stream: &mut TcpStream) -> Result<Option<(String, String, String)>, anyhow::Error> {
-    let mut raw: Vec<u8> = Vec::with_capacity(4096);
-    let mut tmp = [0u8; 4096];
-    let mut header_end: Option<usize> = None;
-    let mut content_length: usize = 0;
-
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        if let Some(end) = header_end {
-            let body_received = raw.len().saturating_sub(end);
-            if body_received >= content_length {
-                break;
-            }
-        }
-        let n = match tokio::time::timeout_at(deadline, stream.read(&mut tmp)).await {
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => break,
-        };
-        if n == 0 {
-            break;
-        }
-        raw.extend_from_slice(&tmp[..n]);
-        if raw.len() > 2 * 1024 * 1024 {
-            break;
-        }
-        if header_end.is_none() {
-            if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                let end = pos + 4;
-                header_end = Some(end);
-                let hdr_str = String::from_utf8_lossy(&raw[..pos]);
-                for line in hdr_str.lines().skip(1) {
-                    if let Some((k, v)) = line.split_once(':') {
-                        if k.trim().eq_ignore_ascii_case("content-length") {
-                            content_length = v.trim().parse::<usize>().unwrap_or(0);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if raw.is_empty() {
-        return Ok(None);
-    }
-    let end = header_end.unwrap_or(raw.len());
-    let hdr_str = String::from_utf8_lossy(&raw[..end]);
-    let first_line = hdr_str.lines().next().unwrap_or("");
-    let mut parts = first_line.split_whitespace();
-    let method = parts.next().unwrap_or("GET").to_string();
-    let path = parts.next().unwrap_or("/").to_string();
-    let body_slice = if end < raw.len() {
-        let take = if content_length > 0 {
-            content_length.min(raw.len() - end)
-        } else {
-            raw.len() - end
-        };
-        &raw[end..end + take]
-    } else {
-        &[]
-    };
-    let body = String::from_utf8_lossy(body_slice).to_string();
-    Ok(Some((method, path, body)))
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn handle_conn(
     mut stream: TcpStream,
@@ -420,25 +504,43 @@ async fn handle_conn(
     airdrop_port: u16,
     rqs: Arc<Mutex<RQS>>,
     airdrop: AirDropManager,
+    api_v1: ApiV1State,
     msg_tx: broadcast::Sender<ChannelMessage>,
     disc_tx: broadcast::Sender<EndpointInfo>,
     send_tx: mpsc::Sender<SendInfo>,
     vis_tx: Arc<Mutex<watch::Sender<Visibility>>>,
     auto_accept: Arc<AtomicBool>,
 ) -> Result<(), anyhow::Error> {
-    let Some((method, path, body_owned)) = read_http_request(&mut stream).await? else {
+    let Some(req) = read_http_request(&mut stream).await? else {
         return Ok(());
     };
-    let method = method.as_str();
-    let path = path.as_str();
-    let body = body_owned.as_str();
 
-    if method == "OPTIONS" {
-        let hdr = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n";
+    if req.method == "OPTIONS" {
+        let hdr = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nConnection: close\r\n\r\n";
         stream.write_all(hdr.as_bytes()).await?;
         stream.flush().await?;
         return Ok(());
     }
+
+    if req.path.starts_with("/api/v1") {
+        let ctx = V1Context {
+            device_name: &device_name,
+            airdrop_port,
+            rqs: &rqs,
+            airdrop: &airdrop,
+            api_v1: &api_v1,
+            msg_tx: &msg_tx,
+            disc_tx: &disc_tx,
+            send_tx: &send_tx,
+            vis_tx: &vis_tx,
+            auto_accept: &auto_accept,
+        };
+        return handle_v1_request(&mut stream, &req, ctx).await;
+    }
+
+    let method = req.method.as_str();
+    let path = req.path.as_str();
+    let body = req.body.as_str();
 
     match (method, path) {
         ("GET", "/api/status") => {
@@ -496,6 +598,9 @@ async fn handle_conn(
             }
         }
         ("POST", "/api/discovery/start") => {
+            let _ = api_v1
+                .discovery
+                .ensure_named_session("builtin-ui", "desktop-ui", 300);
             if !airdrop.is_exclusive_active().await {
                 let mut guard = rqs.lock().unwrap();
                 let _ = guard.discovery(disc_tx.clone());
@@ -504,9 +609,16 @@ async fn handle_conn(
             write_json(&mut stream, br#"{"ok":true}"#).await?;
         }
         ("POST", "/api/discovery/stop") => {
-            rqs.lock().unwrap().stop_discovery();
-            if !airdrop.is_exclusive_active().await {
-                airdrop.stop_discovery().await;
+            let (_existed, should_stop, active_count) = api_v1.discovery.remove_session("builtin-ui");
+            if should_stop || active_count == 0 {
+                rqs.lock().unwrap().stop_discovery();
+                if !airdrop.is_exclusive_active().await {
+                    airdrop.stop_discovery().await;
+                }
+            } else {
+                info!(
+                    "Desktop UI stopped discovery, keeping scan active for {active_count} external session(s)"
+                );
             }
             write_json(&mut stream, br#"{"ok":true}"#).await?;
         }
@@ -533,6 +645,10 @@ async fn handle_conn(
         }
         ("POST", "/api/airdrop/disable") => {
             let st = airdrop.disable().await.unwrap_or_else(|_| AirDropRadioStatus::default());
+            if api_v1.discovery.active_count() > 0 {
+                let mut guard = rqs.lock().unwrap();
+                let _ = guard.discovery(disc_tx.clone());
+            }
             let body = serde_json::to_vec(&serde_json::json!({ "ok": true, "airdrop": st }))?;
             write_json(&mut stream, &body).await?;
         }
@@ -754,25 +870,6 @@ async fn read_system_theme() -> (Option<String>, Option<String>) {
     }
 
     (accent, scheme)
-}
-
-fn expand_file_paths(raw: &[String]) -> Vec<String> {
-    fn visit(p: &std::path::Path, out: &mut Vec<String>) {
-        if p.is_file() {
-            out.push(p.to_string_lossy().to_string());
-        } else if p.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(p) {
-                for entry in entries.flatten() {
-                    visit(&entry.path(), out);
-                }
-            }
-        }
-    }
-    let mut out = Vec::new();
-    for s in raw {
-        visit(&PathBuf::from(s), &mut out);
-    }
-    out
 }
 
 async fn pick_files_dialog() -> Vec<String> {

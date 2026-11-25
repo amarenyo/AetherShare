@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=org.aethershare.Service
+Exec=/usr/bin/aethershare-desktop --background

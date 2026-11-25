@@ -368,6 +368,19 @@ impl AirDropManager {
         peer_name: String,
         files: Vec<PathBuf>,
     ) -> Result<()> {
+        self.send_files_with_id(endpoint_id, peer_name, files, None)
+            .await
+    }
+
+    /// Sends files to a discovered Apple AirDrop peer using an optional caller-supplied
+    /// `transfer_id` (used by `/api/v1/transfers`) and honoring `TransferAction::TransferCancel`.
+    pub async fn send_files_with_id(
+        &self,
+        endpoint_id: String,
+        peer_name: String,
+        files: Vec<PathBuf>,
+        explicit_transfer_id: Option<String>,
+    ) -> Result<()> {
         if self.inner.lock().await.is_none() {
             return Err(anyhow!(
                 "AirDrop AWDL radio is not active — enable AirDrop mode first"
@@ -388,7 +401,8 @@ impl AirDropManager {
         let sender = Sender::new(sender::Config::new(device_name, service_id))
             .map_err(|e| anyhow!("AirDrop sender init failed: {e}"))?;
 
-        let transfer_id = format!("airdrop-out-{}", rand_u64());
+        let transfer_id =
+            explicit_transfer_id.unwrap_or_else(|| format!("airdrop-out-{}", rand_u64()));
         let file_names: Vec<String> = files
             .iter()
             .map(|p| {
@@ -490,11 +504,41 @@ impl AirDropManager {
             peer_name
         );
 
+        // Listen for local TransferCancel matching this transfer_id
+        let cancel_ctk = CancellationToken::new();
+        {
+            let mut cancel_rx = self.msg_tx.subscribe();
+            let tid_cancel = transfer_id.clone();
+            let ctk_cancel = cancel_ctk.clone();
+            tokio::spawn(async move {
+                while let Ok(cm) = cancel_rx.recv().await {
+                    if cm.id == tid_cancel {
+                        if let Message::Lib {
+                            action: TransferAction::TransferCancel,
+                        } = cm.msg
+                        {
+                            ctk_cancel.cancel();
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
         // On Intel exclusive mode (channel 6), an iPhone may need an extra AWDL slot
         // before accepting the TLS connection — retry transient connect timeouts/refusals.
         let mut outcome = Err(io::Error::new(io::ErrorKind::TimedOut, "not attempted"));
+        let mut cancelled_locally = false;
         for attempt in 1..=3 {
-            outcome = sender.send(addr, &payload, flags, Some(ev_tx.clone())).await;
+            tokio::select! {
+                _ = cancel_ctk.cancelled() => {
+                    cancelled_locally = true;
+                    break;
+                }
+                res = sender.send(addr, &payload, flags, Some(ev_tx.clone())) => {
+                    outcome = res;
+                }
+            }
             match &outcome {
                 Err(e)
                     if attempt < 3
@@ -503,19 +547,31 @@ impl AirDropManager {
                             io::ErrorKind::TimedOut | io::ErrorKind::ConnectionRefused
                         ) =>
                 {
-                    if self.inner.lock().await.is_none() {
+                    if self.inner.lock().await.is_none() || cancel_ctk.is_cancelled() {
                         break;
                     }
                     info!(
                         "AirDropManager: send attempt {attempt}/3 to {peer_name} got {e}; retrying..."
                     );
-                    tokio::time::sleep(Duration::from_millis(600)).await;
+                    tokio::select! {
+                        _ = cancel_ctk.cancelled() => {
+                            cancelled_locally = true;
+                            break;
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(600)) => {}
+                    }
                 }
                 _ => break,
             }
         }
         drop(ev_tx);
         let _ = progress_task.await;
+
+        if cancelled_locally || cancel_ctk.is_cancelled() {
+            info!("AirDropManager: transfer {transfer_id} cancelled locally");
+            emit(TransferState::Cancelled, 0, total_size);
+            return Ok(());
+        }
 
         match outcome {
             Ok(Outcome::Delivered) => {

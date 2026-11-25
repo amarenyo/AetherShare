@@ -1,6 +1,6 @@
 # Maintainer: amarenyo <https://github.com/amarenyo/AetherShare>
 pkgname=aethershare
-pkgver=0.2.3
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="Open-Source Android Quick Share & Apple AirDrop (AWDL) Desktop App + CLI for Linux"
 arch=('x86_64')
@@ -74,6 +74,10 @@ package() {
     "$pkgdir/usr/lib/NetworkManager/conf.d/90-aethershare-awdl.conf"
   install -Dm644 "app/packaging/awdl/10-aethershare-awdl0.link" \
     "$pkgdir/usr/lib/systemd/network/10-aethershare-awdl0.link"
+
+  # Session D-Bus auto-activation for external widgets (KDE Plasma, scripts)
+  install -Dm644 "app/packaging/dbus/org.aethershare.Service.service" \
+    "$pkgdir/usr/share/dbus-1/services/org.aethershare.Service.service"
 
   # Desktop entry matching GTK app_id so KDE/Wayland resolves the app icon
   install -Dm644 "app/packaging/org.aethershare.desktop.desktop" \
