@@ -1,23 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#FFFFFF"/>
-      <stop offset="100%" stop-color="#E8EEFF"/>
-    </linearGradient>
     <linearGradient id="badge" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#254EB0"/>
       <stop offset="100%" stop-color="#112763"/>
     </linearGradient>
   </defs>
-  <rect width="256" height="256" rx="64" fill="url(#bg)"/>
-  <path fill="url(#badge)" d="M128 24 C144 24 150 42 164 46 C178 50 192 38 204 50 C216 62 204 76 208 90 C212 104 230 110 230 128 C230 146 212 152 208 166 C204 180 216 194 204 206 C192 218 178 206 164 210 C150 214 144 232 128 232 C112 232 106 214 92 210 C78 206 64 218 52 206 C40 194 52 180 48 166 C44 152 26 146 26 128 C26 110 44 104 48 90 C52 76 40 62 52 50 C64 38 78 50 92 46 C106 42 112 24 128 24 Z"/>
+  <path fill="url(#badge)" d="M128 8 C146 8 153 29 170 33 C186 38 202 24 216 38 C230 52 216 68 220 84 C225 100 246 107 246 128 C246 149 225 156 220 172 C216 188 230 204 216 218 C202 232 186 218 170 223 C153 227 146 248 128 248 C110 248 103 227 86 223 C70 218 54 232 40 218 C26 204 40 188 36 172 C31 156 10 149 10 128 C10 107 31 100 36 84 C40 68 26 52 40 38 C54 24 70 38 86 33 C103 29 110 8 128 8 Z"/>
   <!-- Bidirectional Quick-Share style opposing rounded arrows -->
-  <g fill="none" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round" stroke-linejoin="round">
+  <g fill="none" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
     <!-- Top arrow pointing right -->
-    <path d="M84 100 H170"/>
-    <path d="M146 76 L172 100 L146 124"/>
+    <path d="M76 96 H178"/>
+    <path d="M150 68 L180 96 L150 124"/>
     <!-- Bottom arrow pointing left -->
-    <path d="M172 156 H86"/>
-    <path d="M110 132 L84 156 L110 180"/>
+    <path d="M180 160 H78"/>
+    <path d="M106 132 L76 160 L106 188"/>
   </g>
 </svg>
